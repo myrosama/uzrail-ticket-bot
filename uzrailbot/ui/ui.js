@@ -212,8 +212,9 @@
               || '<option value="">nobody else can take it (everyone has a seat or a ticket)</option>'}</select></label>
           </div>
           <p class="muted small">The reservation is cancelled and the same seat is re-booked for the new passenger at
-            once. That almost always works (others see a freed seat only 2-9 s later). The new passenger also becomes #1
-            in the trip, so if someone is faster they are searched for first.</p>
+            once. That almost always works (others see a freed seat only 2-9 s later); if it doesn't come back, another
+            seat in the car or class is taken. The new passenger also becomes #1 in the trip.
+            ${(h.passengers || []).length > 1 ? "<b>This reservation has several passengers: all its seats are released and re-booked together, so seat numbers may change.</b>" : ""}</p>
           <div class="row-btns"><button type="button" class="btn ghost sm" data-xfer-close>Back</button>
             <button type="submit" class="btn primary sm">Move the seat</button></div>
         </form>
@@ -247,7 +248,7 @@
     const btn = f.querySelector("[type=submit]");
     btn.disabled = true; btn.textContent = "Moving…";
     const r = await api("/api/transfer", { order: f.dataset.xfer, from: f.from.value, to: f.to.value });
-    toast(r.ok ? "Seat moved: the new reservation is in Telegram" : r.error);
+    toast(r.ok ? (r.error ? `Moved. ${r.error}` : "Seat moved: the new reservation is in Telegram") : r.error);
     btn.disabled = false; btn.textContent = "Move the seat";
     refresh();
   });

@@ -824,39 +824,44 @@ class Engine:
             return False, "The trip of this reservation was deleted."
         new_ids = [to_pid if p == from_pid else p for p in h["passengers"]]
         people = [self.friends[p] for p in new_ids if p in self.friends]
-        # the new passenger goes first in the trip's priority; the old one stays (searched for again)
-        order = [to_pid] + [p for p in trip["passengers"] if p != to_pid]
-        if len(order) > 4:
-            order = [p for p in order if p != from_pid][:4]
-        trip = self.store.upsert_trip(dict(trip, passengers=order))
-        trains = self.client.trains(h["date"], trip["from"]["code"], trip["to"]["code"])
-        train = next((t for t in trains if t["number"] == h["train"]), None)
-        if not train:
-            return False, f"Train {h['train']} is no longer listed, so the seat can't be moved."
-        price = int((h.get("total") or 0) / max(1, len(h["passengers"])))
-        hit = {"number": h["train"], "cls": h["cls"], "price": price, "free": len(new_ids), "train": train}
-        car = {"number": h["car"], **(h.get("car_info") or {})}
-        seats = sorted(int(x) for x in h.get("seats") or [] if str(x).isdigit())
-        rng = f"{seats[0]}-{seats[-1]}" if seats else "1-99"
-        self.moving_pax.update(h["passengers"] + new_ids)
+        guarded = set(h["passengers"]) | set(new_ids)
+        # Guard FIRST: nothing else may book these passengers or this trip until the transfer is over. (Live,
+        # 7-8 Nov: the new passenger was put on the trip, the guard came ~1 s later, and in that second the
+        # watcher booked them a second seat.)
+        self.moving_pax.update(guarded)
+        with self.lock:
+            self.booking.add(trip["id"])
         try:
+            # the new passenger goes first in the trip's priority; the old one stays (searched for again)
+            order = [to_pid] + [p for p in trip["passengers"] if p != to_pid]
+            if len(order) > 4:
+                order = [p for p in order if p != from_pid][:4]
+            trip = self.store.upsert_trip(dict(trip, passengers=order))
+            trains = self.client.trains(h["date"], trip["from"]["code"], trip["to"]["code"])
+            train = next((t for t in trains if t["number"] == h["train"]), None)
+            if not train:
+                return False, f"Train {h['train']} is no longer listed, so the seat can't be moved."
+            price = int((h.get("total") or 0) / max(1, len(h["passengers"])))
+            hit = {"number": h["train"], "cls": h["cls"], "price": price, "free": len(new_ids), "train": train}
+            car = {"number": h["car"], **(h.get("car_info") or {})}
+            seats = sorted(int(x) for x in h.get("seats") or [] if str(x).isdigit())
+            rng = f"{seats[0]}-{seats[-1]}" if seats else "1-99"
             self.ours.add(oid)
             t0 = time.time()
             self.client.cancel(oid)
             self._drop_hold(oid, "transferred")
-            rec.ev("transfer_start", order=oid, train=h["train"], car=h["car"], range=rng)
+            rec.ev("transfer_start", order=oid, train=h["train"], car=h["car"], range=rng, passengers=len(new_ids))
             # re-booking before the railway has released the seat just fails (measured: the release came 70 ms
             # after the cancel; a reserve sent at 49 ms failed and cost a whole extra round of ~1.8 s)
             if self.live is not None and self.live.connected:
                 self.live.wait_for(lambda d: eticket._ev_order(d) == oid and d.get("state") in eticket.FAILED_STATES,
                                    timeout=1.5, since=t0 - 1)
-            # The railway confirms the release within ~0.1 s but the seat is bookable only ~1-2 s later
-            # (measured), so send staggered attempts and keep the first that holds; _settle_many cancels any
-            # extra hold. Two rounds at most.
+            # The seat becomes bookable ~0.2-0.6 s after the release (measured), so send staggered attempts and
+            # keep the first that holds; _settle_many cancels any extra hold. Two rounds at most.
             winner = None
             for rnd in range(2):
                 orders, ts = {}, time.time()
-                for k, delay in enumerate((0.1, 0.5, 0.9, 1.3, 1.8)):
+                for delay in (0.1, 0.5, 0.9, 1.3, 1.8):
                     time.sleep(max(0.0, ts + delay - time.time()))
                     new_oid = self._reserve(trip, hit, car, rng, people)
                     if new_oid:
@@ -867,16 +872,34 @@ class Engine:
                 if winner:
                     break
             if not winner:
-                return False, ("The seat was released but someone else took it first. I'm searching for both "
+                # The exact seats didn't come back (live, 8 Nov: a 3-seat block in car 19 never did, while other
+                # seats in that car were free): take any seats in the same car, then other cars of the class.
+                cars = [car] + [{"number": n, **i} for n, i in self._cars_cache(h["train"], h["cls"], h["date"]).items()
+                                if str(n) != str(h["car"])][:3]
+                orders, ts = {}, time.time()
+                for c in cars:
+                    new_oid = self._reserve(trip, hit, c, "1-99", people)
+                    if new_oid:
+                        orders[new_oid] = (c, people, "transfer-any-seat")
+                winner = self._settle_many(orders, ts) if orders else None
+                rec.ev("transfer_attempt", attempt=3, sent=len(orders), fallback="any seat in the car/class",
+                       result="RESERVED" if winner else "FAILED", ms=round((time.time() - t0) * 1000))
+            if not winner:
+                return False, ("The seats were released but someone else took them first. I'm searching for these "
                                "passengers again, the new one first.")
             new_oid, wcar, who, data, path = winner
-            self._finalize(trip, h["date"], hit, new_oid, wcar, who, data, time.time() - t0, "transfer")
-            return True, ""
+            self._finalize(trip, h["date"], hit, new_oid, wcar, who, data, time.time() - t0, path)
+            new = self.store.state["holds"].get(new_oid) or {}
+            same = str(wcar["number"]) == str(h["car"]) and sorted(new.get("seats") or []) == sorted(h.get("seats") or [])
+            return True, "" if same else (f"The same seats didn't come back, so I booked car {wcar['number']}, "
+                                          f"seat {', '.join(new.get('seats') or ['?'])} instead.")
         except EticketError as e:
             rec.ev("transfer_error", order=oid, error=str(e)[:200])
             return False, f"The railway refused: {e}"
         finally:
-            self.moving_pax.difference_update(h["passengers"] + new_ids)
+            self.moving_pax.difference_update(guarded)
+            with self.lock:
+                self.booking.discard(trip["id"])
 
     def _on_live(self, d):
         oid = eticket._ev_order(d)

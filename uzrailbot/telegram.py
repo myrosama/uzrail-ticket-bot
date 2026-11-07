@@ -876,8 +876,11 @@ class Bot:
                 f"🔄 Move seat <b>{H(str(seat_of.get(frm, '?')))}</b> (train {H(h['train'])}, car {H(h['car'])}) from "
                 f"<b>{H(names.get(frm, '?'))}</b> to <b>{H(names.get(to, '?'))}</b>?\n\n"
                 "I cancel this reservation and at once re-book the same seat for the new passenger. That almost always "
-                "works: everyone else sees a freed seat only 2-9 s later. If someone is faster anyway, I search for both "
-                f"again, {H(names.get(to, 'the new passenger'))} first."),
+                "works: everyone else sees a freed seat only 2-9 s later. If the same seat doesn't come back I take "
+                "another seat in the car or class; if nothing is left, I search again, "
+                f"{H(names.get(to, 'the new passenger'))} first."
+                + (f"\n\n⚠️ This reservation has {len(h['passengers'])} passengers: all its seats are released and "
+                   "re-booked together, so seat numbers may change." if len(h["passengers"]) > 1 else "")),
                 {"inline_keyboard": [[{"text": "✅ Move the seat", "callback_data": f"xgo:{oid}:{frm}:{to}"}], back]})
         # xgo: do it (takes a few seconds), without blocking the chat
         self.edit(mid, f"🔄 Moving the seat to <b>{H(names.get(to, '?'))}</b>…")
@@ -885,8 +888,8 @@ class Bot:
         def go():
             ok, msg = self.engine.transfer_hold(oid, frm, to)
             rec.ev("user_transfer", order=oid, ok=ok, source="telegram")
-            self.edit(mid, f"🔄 Seat moved to <b>{H(names.get(to, '?'))}</b>. The new reservation is below: pay there."
-                      if ok else f"⚠️ {H(msg)}")
+            self.edit(mid, (f"🔄 Seat moved to <b>{H(names.get(to, '?'))}</b>. " + (f"{H(msg)} " if msg else "")
+                            + "The new reservation is below: pay there.") if ok else f"⚠️ {H(msg)}")
         threading.Thread(target=go, daemon=True).start()
 
     def _hold_text(self, h, head="✅ <b>Seats reserved!</b>"):
