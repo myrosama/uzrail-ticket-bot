@@ -321,17 +321,23 @@ class App:
     def quit(self):
         rec.ev("stop")
         self.stop_services()
-        if self.tray:
-            try:
-                self.tray.stop()
-            except Exception:
-                pass
-        if self.window is not None:
-            try:
-                self.window.destroy()
-            except Exception:
-                pass
-        time.sleep(0.3)
+
+        def close_ui():
+            if self.tray:
+                try:
+                    self.tray.stop()
+                except Exception:
+                    pass
+            if self.window is not None:
+                try:
+                    self.window.destroy()
+                except Exception:
+                    pass
+        # Closing the tray icon / window can block on some desktops (seen on Linux/GTK): give it a moment,
+        # then leave regardless.
+        t = threading.Thread(target=close_ui, daemon=True)
+        t.start()
+        t.join(1.5)
         os._exit(0)
 
     @staticmethod
