@@ -125,7 +125,7 @@ It also shows what the railway has right now on your dates.
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TB
     R[("Railway site")] <-->|"check every 0.8 s<br/>reserve new seats"| B["UzRail Bot<br/>(your computer)"]
     B <-->|"alerts · Pay · PDF<br/>trips · transfer"| T["Your<br/>Telegram"]
 ```
