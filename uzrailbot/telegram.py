@@ -112,8 +112,8 @@ def fmt_trip_time(dep, arr) -> str:
 
 
 def short_label(code: str) -> str:
-    return {"3П": "Plaskart", "2К": "Kupe", "1Л": "SV", "2Е": "Sit eco", "1С": "Sit biz", "2В": "Sit 2nd",
-            "1В": "Sit 1st"}.get(code, code)
+    return {"3П": "Plaskart", "2К": "Kupe", "1Л": "SV", "1А": "Lux", "2Е": "Sit eco", "1С": "Sit biz",
+            "2В": "Sit 2nd", "1В": "Sit 1st"}.get(code, code)
 
 
 def fmt_left(seconds: float) -> str:
@@ -726,12 +726,12 @@ class Bot:
     def _trains_msg(self, t, rows):
         picked = t.get("trains") or []
         dates = len([d for d in t["dates"]])
-        text = (f"🚆 <b>Trains on your {'date' if dates == 1 else 'dates'}</b> · "
+        text = (f"🚆 <b>Live seats on your {'date' if dates == 1 else 'dates'}</b> · "
                 f"{H(t['from']['name'].title())} → {H(t['to']['name'].title())}\n")
         if picked:
             text += f"Watching <b>only {', '.join(H(n) for n in picked)}</b>. Tap a train to add or remove it."
         else:
-            text += "Watching <b>all of them</b>. Tap a train to watch only that one."
+            text += "Watching <b>all of them</b>. Free seats per train right now; tap a train to watch only that one."
         kb = [[{"text": ("✅ " if not picked else "") + "All trains", "callback_data": f"tr:{t['id']}:*"}]]
         for r in rows[:12]:
             seats = sum(r["classes"].values())

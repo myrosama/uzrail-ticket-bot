@@ -7,10 +7,10 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
   const CLASSES = {
-    "3П": "Plaskart", "2К": "Kupe", "1Л": "SV / Lux", "2Е": "Sitting economy",
+    "3П": "Plaskart", "2К": "Kupe", "1Л": "SV", "1А": "Lux", "2Е": "Sitting economy",
     "1С": "Sitting business", "2В": "Sitting 2nd class", "1В": "Sitting 1st class",
   };
-  const SHORT = { "3П": "Plaskart", "2К": "Kupe", "1Л": "SV", "2Е": "Sitting eco", "1С": "Sitting biz", "2В": "Sitting 2nd", "1В": "Sitting 1st" };
+  const SHORT = { "3П": "Plaskart", "2К": "Kupe", "1Л": "SV", "1А": "Lux", "2Е": "Sitting eco", "1С": "Sitting biz", "2В": "Sitting 2nd", "1В": "Sitting 1st" };
   const cls = (c) => CLASSES[c] || c;
   const short = (c) => SHORT[c] || c;
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

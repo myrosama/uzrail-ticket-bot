@@ -41,8 +41,11 @@ menu, and opens it. Run the same line again to update.
    - connect your eticket.uzrailpass.uz login;
    - add a trip: from/to, one or more dates, accepted classes, max price, passengers in priority order (up to
      4, from the saved passengers on your railway account), and **Notify** or **Auto-buy**.
-   - after you save, the bot lists the trains running on your dates with their departure and arrival times.
-     Every train is watched by default; tap one or more to watch only those.
+   - as soon as you pick From and To, the editor lists the trains on that route: departure → arrival,
+     brand, the classes each carries, and whether it runs on your dates. Every train is watched by
+     default; tap one or more to watch only those. **Ticket classes** then shows only the classes those
+     trains have, each with a train count. Others are kept under "Other classes".
+   - after you save, the bot checks your dates live and replies with each train's free seats right now.
 4. Leave the computer on. On Windows the bot stops it from going to sleep while trips are being watched.
 
 ## What you get in Telegram
@@ -142,6 +145,7 @@ Your settings folder is kept; delete it to remove everything.
 python -m venv .venv && .venv/bin/pip install -e .     # Windows: start.bat
 python -m uzrailbot                                    # UZRAILBOT_HOME=<dir> keeps test data separate
 python tools/build_stations.py                         # refresh docs/stations.json (station list for the mini app)
+python tools/build_timetable.py                        # refresh docs/timetable.json (trains, stops, times, classes)
 python tools/make_icons.py                             # regenerate the icons
 ```
 

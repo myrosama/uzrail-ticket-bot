@@ -13,7 +13,8 @@
   const CLASSES = [
     { c: "3П", name: "Plaskart", sub: "open sleeper" },
     { c: "2К", name: "Kupe", sub: "4-berth compartment" },
-    { c: "1Л", name: "SV / Lux", sub: "2-berth" },
+    { c: "1Л", name: "SV", sub: "2-berth" },
+    { c: "1А", name: "Lux", sub: "premium 2-berth" },
     { c: "2Е", name: "Sitting", sub: "economy" },
     { c: "1С", name: "Sitting", sub: "business" },
     { c: "2В", name: "Sitting", sub: "2nd class" },
@@ -52,8 +53,15 @@
   const today = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
   const fmtDay = (s) => new Date(s + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short" });
   const fmtSum = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
-  const classLabel = (c) => { const k = CLASSES.find((x) => x.c === c); return k ? `${k.name} ${k.sub}` : c; };
-  const shortClass = (c) => { const k = CLASSES.find((x) => x.c === c); return k ? (k.name === "Sitting" ? `Sitting ${k.sub}` : k.name) : c; };
+  function classMeta(c) {
+    const k = CLASSES.find((x) => x.c === c);
+    if (k) return k;
+    const sit = /[СВЕ]$/.test(c);
+    const name = sit ? "Sitting" : c[0] === "3" ? "Plaskart" : c[0] === "2" ? "Kupe" : c[0] === "1" ? "SV" : "Class";
+    return { c, name, sub: `class ${c}` };
+  }
+  const classLabel = (c) => { const k = classMeta(c); return `${k.name} ${k.sub}`; };
+  const shortClass = (c) => { const k = classMeta(c); return k.name === "Sitting" || !CLASSES.some((x) => x.c === c) ? `${k.name} ${k.sub.replace("class ", "")}` : k.name; };
   const haptic = () => { try { tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged(); } catch (e) { /* older clients */ } };
 
   function toast(msg, ms = 2600) {
@@ -104,6 +112,69 @@
   fetch("stations.json").then((r) => r.json()).then((list) => {
     STATIONS = list.map((s) => ({ ...s, key: [s.en, s.uz, s.ru].map(norm).join(" | ") }));
   }).catch(() => { STATIONS = []; });
+
+  // ------------------------------------------------------------------ timetable (bundled; built by tools/build_timetable.py)
+  let TT = null;
+  let onTimetable = null;
+  fetch("timetable.json?v=1").then((r) => r.json()).then((t) => { TT = t; if (onTimetable) onTimetable(); })
+    .catch(() => { TT = { trains: {}, groups: {} }; if (onTimetable) onTimetable(); });
+  const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  const codesFor = (code) => new Set((TT && TT.groups && TT.groups[code]) || [code]);
+
+  /* Trains that stop at `from` and later at `to`: number, brand, classes, dep/arr times, nights, running days. */
+  function routeTrains(from, to) {
+    if (!TT || !from || !to) return [];
+    const A = codesFor(from), B = codesFor(to), out = [];
+    for (const [n, t] of Object.entries(TT.trains || {})) {
+      const s = t.s || [];
+      const i = s.findIndex((x) => A.has(x[0]) && x[2]);
+      if (i < 0) continue;
+      let j = -1;
+      for (let k = i + 1; k < s.length; k++) if (B.has(s[k][0])) { j = k; break; }
+      if (j < 0) continue;
+      out.push({ n, b: t.b || "", c: t.c || [], dep: s[i][2], arr: s[j][1] || s[j][2],
+                 nights: Math.max(0, s[j][3] - s[i][4]), fromDay: s[i][4], r: t.r || null });
+    }
+    return out.sort((x, y) => x.dep.localeCompare(y.dep));
+  }
+
+  /* The timetable's day names come in English or Russian. */
+  const DAY_KEYS = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+                     "вс": 0, "пн": 1, "вт": 2, "ср": 3, "чт": 4, "пт": 5, "сб": 6 };
+  const DAY_EN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const dayIndex = (x) => { const k = String(x).toLowerCase().slice(0, 3); return DAY_KEYS[k] ?? DAY_KEYS[k.slice(0, 2)]; };
+  const isDaily = (x) => /every|daily|ежедневно/i.test(String(x));
+
+  /* Does the train leave `from` on this date? true / false / null (the timetable doesn't say). */
+  function runsOn(t, isoDate) {
+    const r = t.r;
+    if (!r) return null;
+    const dt = new Date(isoDate + "T00:00:00");
+    dt.setDate(dt.getDate() - (t.fromDay || 0));                 // the date it left its first station
+    const dd = String(dt.getDate()).padStart(2, "0"), mm = String(dt.getMonth() + 1).padStart(2, "0");
+    const md = (x) => { const m = String(x || "").match(/^(\d{2})\.(\d{2})/); return m ? m[2] + m[1] : null; };
+    const cur = mm + dd;
+    // outside this timetable season: the next season usually continues the train, so "don't know"
+    if (r.from && md(r.from) && cur < md(r.from) && !(md(r.from) > "1100" && cur < "0300")) return null;
+    if (r.to && md(r.to) && cur > md(r.to) && !(md(r.to) < "0300" && cur > "1100")) return null;
+    if (Array.isArray(r.dates) && r.dates.length) return r.dates.some((x) => String(x).startsWith(`${dd}.${mm}`));
+    const days = (r.daysOfWeek || []).map(String);
+    if (!days.length || days.some(isDaily)) return true;
+    if (days.some((x) => /odd|нечет/i.test(x))) return dt.getDate() % 2 === 1;
+    if (days.some((x) => /even|чет/i.test(x))) return dt.getDate() % 2 === 0;
+    const idx = days.map(dayIndex).filter((x) => x !== undefined);
+    return idx.length ? idx.includes(dt.getDay()) : null;
+  }
+  const runText = (r) => {
+    if (!r) return "";
+    const days = (r.daysOfWeek || []).map(String);
+    if (Array.isArray(r.dates) && r.dates.length) return "on set dates";
+    if (!days.length || days.some(isDaily)) return "";
+    if (days.some((x) => /odd|нечет/i.test(x))) return "odd dates";
+    if (days.some((x) => /even|чет/i.test(x))) return "even dates";
+    const idx = days.map(dayIndex).filter((x) => x !== undefined);
+    return idx.length ? idx.map((i) => DAY_EN[i]).join(", ") : "";
+  };
 
   function searchStations(q) {
     const n = norm(q);
@@ -238,14 +309,18 @@
       </section>
 
       <section class="card form-section">
-        <h3>Trains</h3>
-        <div class="chips" id="trainChips"></div>
+        <h3>Trains on this route <span class="muted small" id="trainCount"></span></h3>
+        <div id="trainList"></div>
         <p class="hint" id="trainHint"></p>
       </section>
 
       <section class="card form-section">
         <h3>Ticket classes</h3>
         <div class="chips" id="classes"></div>
+        <details class="more-classes" id="otherClasses" hidden>
+          <summary>Other classes <span class="muted" id="otherCount"></span></summary>
+          <div class="chips" id="classesOther"></div>
+        </details>
         <p class="hint" id="classHint"></p>
         <div class="field" style="margin-top:14px">
           <label for="maxPrice">Maximum price per ticket (optional)</label>
@@ -289,7 +364,7 @@
       if (d[key]) {
         box.innerHTML = `<div class="picked"><span>${esc(title(d[key].name))}<small>${label}</small></span>
           <button class="icon-btn" aria-label="Change ${label}"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>`;
-        box.querySelector("button").onclick = () => { d[key] = null; stationBox(key, label); box.querySelector("input").focus(); validate(); };
+        box.querySelector("button").onclick = () => { d[key] = null; stationBox(key, label); box.querySelector("input").focus(); validate(); refreshRoute(); };
         return;
       }
       box.innerHTML = `<input class="input" placeholder="${label}: type a station" autocomplete="off"><div class="suggest" hidden></div>`;
@@ -307,14 +382,14 @@
             haptic();
             stationBox(key, label);
             validate();
-            if (typeof drawTrains === "function") drawTrains();
+            refreshRoute();
           };
         });
       });
     }
     stationBox("from", "From");
     stationBox("to", "To");
-    $("#swap").onclick = () => { [d.from, d.to] = [d.to, d.from]; stationBox("from", "From"); stationBox("to", "To"); haptic(); validate(); drawTrains(); };
+    $("#swap").onclick = () => { [d.from, d.to] = [d.to, d.from]; stationBox("from", "From"); stationBox("to", "To"); haptic(); validate(); refreshRoute(); };
 
     // calendar
     const DOW = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
@@ -337,7 +412,7 @@
         b.onclick = () => {
           const k = b.dataset.d;
           d.dates = d.dates.includes(k) ? d.dates.filter((x) => x !== k) : [...d.dates, k].sort();
-          haptic(); drawCal(); validate();
+          haptic(); drawCal(); validate(); refreshRoute();
         };
       });
       $("#chosen").innerHTML = d.dates.map((x) => `<span class="tag green">${fmtDay(x)}</span>`).join("") ||
@@ -349,18 +424,42 @@
     $("#nextM").onclick = () => { month = new Date(month.getFullYear(), month.getMonth() + 1, 1); drawCal(); };
     drawCal();
 
-    // classes
+    // classes: the ones this route's trains carry come first, with how many trains have them
+    function relevantTrains() {
+      let list = routeTrains(d.from && d.from.code, d.to && d.to.code);
+      if (d.trains.length) list = list.filter((t) => d.trains.includes(t.n));
+      else if (d.dates.length) {
+        const running = list.filter((t) => d.dates.some((x) => runsOn(t, x) !== false));
+        if (running.length) list = running;
+      }
+      return list;
+    }
     function drawClasses() {
-      $("#classes").innerHTML = CLASSES.map((k) => `<button class="chip ${d.classes.includes(k.c) ? "on" : ""}" data-c="${k.c}">
-        <span class="check">✓</span>${esc(k.name)}<span class="muted">${esc(k.sub)}</span></button>`).join("");
-      $("#classes").querySelectorAll(".chip").forEach((b) => {
+      const trains = relevantTrains();
+      const count = {};
+      for (const t of trains) for (const c of t.c) count[c] = (count[c] || 0) + 1;
+      const known = trains.length && Object.keys(count).length;
+      const extra = Object.keys(count).filter((c) => !CLASSES.some((k) => k.c === c)).map(classMeta);
+      const main = known ? [...CLASSES.filter((k) => count[k.c]), ...extra] : CLASSES;
+      const rest = known ? CLASSES.filter((k) => !count[k.c]) : [];
+      const chip = (k) => `<button class="chip ${d.classes.includes(k.c) ? "on" : ""}" data-c="${k.c}">
+        <span class="check">✓</span>${esc(k.name)}<span class="muted">${esc(k.sub)}${count[k.c] ? ` · ${count[k.c]} train${count[k.c] === 1 ? "" : "s"}` : ""}</span></button>`;
+      $("#classes").innerHTML = main.map(chip).join("");
+      $("#classesOther").innerHTML = rest.map(chip).join("");
+      $("#otherClasses").hidden = !rest.length;
+      $("#otherCount").textContent = rest.length ? `(${rest.length}, not seen on this route)` : "";
+      if (rest.some((k) => d.classes.includes(k.c))) $("#otherClasses").open = true;
+      document.querySelectorAll("#classes .chip, #classesOther .chip").forEach((b) => {
         b.onclick = () => {
           const c = b.dataset.c;
           d.classes = d.classes.includes(c) ? d.classes.filter((x) => x !== c) : [...d.classes, c];
           haptic(); drawClasses();
         };
       });
-      $("#classHint").textContent = d.classes.length ? `${d.classes.length} selected` : "Nothing selected means any class.";
+      const what = !d.from || !d.to ? "Pick the route to see which classes its trains have. "
+        : !TT ? "Loading the timetable… "
+        : known ? `Classes on ${d.trains.length ? "your chosen trains" : "this route"}. ` : "";
+      $("#classHint").textContent = what + (d.classes.length ? `${d.classes.length} selected.` : "Nothing selected means any class.");
     }
     drawClasses();
     const mp = $("#maxPrice");
@@ -434,31 +533,66 @@
     $("#speed").querySelectorAll("button").forEach((b) => { b.onclick = () => { d.speed = +b.dataset.v; haptic(); drawSpeed(); }; });
     drawSpeed();
 
-    // trains: every train by default; pick some to watch only those (times come from the PC's last scan)
+    // trains: every train by default; tap some to watch only those
+    let routeKey = d.from && d.to ? d.from.code + ">" + d.to.code : "";
     function drawTrains() {
-      const sameRoute = src && d.from && d.to && src.from.code === d.from.code && src.to.code === d.to.code;
-      const known = sameRoute ? (src.kt || []) : [];
-      if (!sameRoute && d.trains.length && src) d.trains = [];
-      const chips = [`<button class="chip ${d.trains.length ? "" : "on"}" data-t="*"><span class="check">✓</span>All trains</button>`]
-        .concat(known.map(([n, dep, arr]) => `<button class="chip ${d.trains.includes(n) ? "on" : ""}" data-t="${esc(n)}">
-          <span class="check">✓</span>${esc(n)}<span class="muted">${esc(dep)} → ${esc(arr)}</span></button>`))
-        .concat(d.trains.filter((n) => !known.some(([k]) => k === n)).map((n) =>
-          `<button class="chip on" data-t="${esc(n)}"><span class="check">✓</span>${esc(n)}</button>`));
-      $("#trainChips").innerHTML = chips.join("");
-      $("#trainHint").textContent = known.length
-        ? (d.trains.length ? `Watching only ${d.trains.join(", ")}. Tap All trains to watch every train again.`
-                           : "Every train on the route is watched. Tap trains to watch only those.")
-        : "Every train on the route is watched. After you save, the bot lists the trains on your dates with their times, so you can pick one.";
-      $("#trainChips").querySelectorAll("[data-t]").forEach((b) => {
+      const key = d.from && d.to ? d.from.code + ">" + d.to.code : "";
+      if (key !== routeKey) { d.trains = []; routeKey = key; }          // a new route: back to all trains
+      const list = $("#trainList");
+      if (!key) {
+        list.innerHTML = `<p class="placeholder">Pick <b>From</b> and <b>To</b> to see the trains on this route, their times and classes.</p>`;
+        $("#trainCount").textContent = ""; $("#trainHint").textContent = "";
+        return;
+      }
+      if (!TT) { list.innerHTML = `<p class="placeholder">Loading the timetable…</p>`; return; }
+      const rows = routeTrains(d.from.code, d.to.code);
+      const sameRoute = src && src.from.code === d.from.code && src.to.code === d.to.code;
+      for (const [n, dep, arr] of (sameRoute && src.kt) || []) {         // trains the PC saw that the timetable lacks
+        if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep, arr, nights: 0, fromDay: 0, r: null });
+      }
+      for (const n of d.trains) if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep: "", arr: "", nights: 0, r: null });
+      rows.sort((x, y) => (x.dep || "99").localeCompare(y.dep || "99"));
+      $("#trainCount").textContent = rows.length ? `· ${rows.length}` : "";
+      if (!rows.length) {
+        list.innerHTML = `<p class="placeholder">No trains for this route in the timetable. Every train is watched, and the bot
+          shows the live list after you save.</p>`;
+        $("#trainHint").textContent = "";
+        return;
+      }
+      const all = !d.trains.length;
+      list.innerHTML = `<button class="train-row all ${all ? "on" : ""}" data-t="*"><span class="tick">✓</span>
+          <span class="t-main"><b>All trains</b><small>Watch every train on the route (recommended)</small></span></button>` +
+        rows.map((t) => {
+          const runs = d.dates.map((x) => runsOn(t, x));
+          const no = d.dates.length && runs.every((x) => x === false);
+          const some = d.dates.length && !no && runs.some((x) => x === false);
+          const note = no ? `<em class="warn">doesn't run on your ${d.dates.length === 1 ? "date" : "dates"}</em>`
+            : some ? `<em>runs on ${runs.filter((x) => x !== false).length} of ${d.dates.length} dates</em>`
+            : runText(t.r) ? `<em>${esc(runText(t.r))}</em>` : "";
+          const cls = t.c.map((c) => `<i>${esc(shortClass(c))}</i>`).join("");
+          return `<button class="train-row ${d.trains.includes(t.n) ? "on" : ""} ${no ? "dim" : ""}" data-t="${esc(t.n)}">
+            <span class="tick">✓</span>
+            <span class="t-main"><b>${esc(t.n)}</b><small>${esc(t.b)}</small></span>
+            <span class="t-time">${esc(t.dep || "")}${t.dep ? " → " : ""}${esc(t.arr || "")}${t.nights ? `<sup>+${t.nights}</sup>` : ""}</span>
+            <span class="t-cls">${cls}${note}</span>
+          </button>`;
+        }).join("");
+      $("#trainHint").textContent = all
+        ? "From the railway timetable. Live seats are checked after you save."
+        : `Watching only ${d.trains.join(", ")}. Tap All trains to watch every train again.`;
+      list.querySelectorAll("[data-t]").forEach((b) => {
         b.onclick = () => {
           const n = b.dataset.t;
           if (n === "*") d.trains = [];
           else d.trains = d.trains.includes(n) ? d.trains.filter((x) => x !== n) : [...d.trains, n];
-          haptic(); drawTrains();
+          haptic(); drawTrains(); drawClasses();
         };
       });
     }
+    function refreshRoute() { drawTrains(); drawClasses(); }
+    onTimetable = () => { if (document.getElementById("trainList")) refreshRoute(); };
     drawTrains();
+    drawClasses();
     drawMode();
 
     function problems() {

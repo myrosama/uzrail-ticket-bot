@@ -9,7 +9,7 @@ import threading
 import uuid
 
 from . import crypto, paths
-from .classes import CLASSES
+from .classes import is_class_code
 
 DEFAULT_WEBAPP_URL = "https://myrosama.github.io/uzrail-ticket-bot/"
 MAX_PASSENGERS = 4          # the railway allows 4 tickets per order
@@ -82,7 +82,7 @@ def normalize_trip(t: dict) -> dict:
         raise ValueError("pick at least one date from today on")
     if len(dates) > MAX_DATES:
         raise ValueError(f"at most {MAX_DATES} dates per trip")
-    classes = [c for c in (t.get("classes") or []) if c in CLASSES]
+    classes = [c for c in (t.get("classes") or []) if is_class_code(c)]
     mode = "buy" if t.get("mode") == "buy" else "notify"
     passengers = [str(p) for p in (t.get("passengers") or [])][:MAX_PASSENGERS]
     if mode == "buy" and not passengers:

@@ -479,8 +479,15 @@ class Engine:
                 self.store.save()
                 rec.ev("learned_cars", train=number, from_date=d,
                        cars={k: list(v) for k, v in self.store.state["cars"].items() if k.startswith(number + "|")})
+                # this train has cars, but none of the wanted classes (e.g. a fast sitting-only train when the
+                # trip wants plaskart): leave it alone for 6 hours instead of asking again every 10 minutes
+                for cls in trip["classes"]:
+                    if not self._cars_cache(number, cls):
+                        self.learn_at[(number, cls)] = time.time() + 6 * 3600
                 return
             time.sleep(0.5)
+        for cls in (trip["classes"] or [None]):     # sold out on every nearby date: try again in 30 min
+            self.learn_at[(number, cls)] = time.time() + 1200
 
     # ---------------------------------------------------------------- booking
     def _remaining(self, trip) -> list:

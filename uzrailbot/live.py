@@ -41,7 +41,7 @@ BIG = {
     "update_found": (CYAN, "UPDATE"), "update_installed": (GREEN, "UPDATE"), "update_restart": (CYAN, "UPDATE"),
     "update_failed": (RED, "UPDATE"), "pdf_fail": (RED, "PDF-FAIL"),
 }
-CLASS_LEGEND = "3П plaskart · 2К kupe · 1Л SV · 2Е/1С/2В/1В sitting"
+CLASS_LEGEND = "3П plaskart · 2К kupe · 1Л SV · 1А lux · 2Е/1С/2В/1В sitting"
 
 
 def latest_events_file():
