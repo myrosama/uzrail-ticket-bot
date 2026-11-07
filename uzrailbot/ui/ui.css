@@ -174,6 +174,11 @@ input { user-select: text; }
 .kv div span { display: block; font-size: 12px; color: var(--muted); }
 .kv div b { font-weight: 600; }
 
+.banner { margin-top: 22px; padding: 12px 16px; border-radius: 14px; background: var(--green-tint);
+  border: 1px solid var(--green-line); color: var(--ink); display: flex; align-items: center; gap: 10px; font-size: 13.5px; }
+.banner.bad { background: var(--danger-tint); border-color: transparent; }
+.banner .spinner { flex: none; }
+
 /* ---------- trips ---------- */
 .trip { padding: 16px 18px; margin-bottom: 12px; display: flex; gap: 16px; align-items: flex-start; }
 .trip.off { opacity: .6; }

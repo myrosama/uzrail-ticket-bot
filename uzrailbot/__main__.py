@@ -112,6 +112,13 @@ def run():
     engine = Engine(store, bot)
     bot.start(engine)
     engine.start()
+
+    def stop_all():
+        engine.stop()
+        bot.stop()
+    from .updater import Updater
+    Updater(store, lambda: not store.state.get("holds") and not engine.booking and not engine.renewing,
+            stop_all).start()
     bot.send("🟢 Bot started on your PC. " + ("Watching your trips." if store.trips() else "Tap ➕ New trip."),
              bot.main_kb())
     last = None

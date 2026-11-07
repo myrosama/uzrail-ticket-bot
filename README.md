@@ -92,6 +92,20 @@ There is no browser. The bot talks to the railway's API directly (see [docs/RESE
 - **Polite:** the bot uses a request budget well below the site's limits. On a "slow down" answer it backs
   off for 30 s.
 
+## Updates
+
+The app updates itself:
+
+- **When:** when it opens, and every 6 hours while it runs.
+- **How:** it checks GitHub for a newer version, then installs it in the background while the old version
+  keeps watching. When that's done, it restarts into the new version.
+- **Never mid-booking:** it won't restart while a booking is in progress or seats are held for you. The
+  restart waits until that's over.
+- **Telegram:** the bot tells you "🔄 Updated to vX".
+
+To turn automatic updates off, go to Settings → *Update automatically*. The app then only tells you about new
+versions, and you install them with **Update now**. Running the install line again also updates.
+
 ## Privacy
 
 Everything stays on your computer: `%LOCALAPPDATA%\UzRailBot` on Windows, `~/.local/share/UzRailBot` on Linux.
@@ -128,5 +142,9 @@ python tools/make_icons.py                             # regenerate the icons
 - `gui.py` and `ui/`: the desktop window and tray.
 
 `docs/` is the Telegram mini app (served by GitHub Pages).
+
+To ship an update to every installed copy, raise `__version__` in `uzrailbot/__init__.py` and push to `main`.
+Pushes that don't change the version don't trigger updates. The mini app (`docs/`) updates for everyone as
+soon as GitHub Pages publishes it.
 
 MIT licence.

@@ -186,7 +186,7 @@
   let lastTs = 0;
   const EV = {
     session_start: null, heartbeat: null, notify: null, plan: null, miniapp: null, http: null, ws: null, check: null,
-    start: () => ["", "Bot started on this PC"],
+    start: (o) => [o.updated_from ? "ok" : "", o.updated_from ? `Updated v${o.updated_from} → v${o.version} and restarted` : `Bot v${o.version} started on this PC`],
     stop: () => ["", "Bot stopped"],
     state: (o) => (o.state === "watching" ? null : ["", `Status: ${o.state}${o.detail ? ` (${o.detail})` : ""}`]),
     availability: (o) => o.free > 0
@@ -222,6 +222,10 @@
     http_fail: (o) => ["warn", `Network problem${o.error ? `: ${o.error}` : ""}`],
     book_error: (o) => ["bad", `Booking error: ${o.error}`],
     cars_retry: () => ["", "Car list was empty, asking again"],
+    update_found: (o) => ["", `New version v${o.latest} found (you have v${o.current})`],
+    update_installed: (o) => ["ok", `v${o.version} installed`],
+    update_restart: (o) => ["", `Restarting into v${o.new}`],
+    update_failed: (o) => ["warn", `Update to v${o.version} failed: ${o.error}`],
   };
 
   function describe(r) {
@@ -251,6 +255,47 @@
       `<div class="ev ${r.tone}"><time>${esc(r.t.slice(0, 8))}</time><i></i><span>${esc(r.text)}</span></div>`).join("");
   }
 
+  /* ---------------------------------------------------------------- updates */
+  function updateText(u) {
+    const v = u.latest ? `v${u.latest}` : "a new version";
+    switch (u.state) {
+      case "downloading": return [true, `Downloading ${v}… The bot keeps watching meanwhile.`];
+      case "installing": return [true, `Installing ${v}… The bot keeps watching meanwhile.`];
+      case "ready": return [true, `${v} is installed. Restarting as soon as no booking is in progress.`];
+      case "restarting": return [true, `Restarting into ${v}…`];
+      case "available": return [false, `${v} is available. Update it in Settings.`];
+      default: return null;
+    }
+  }
+  function renderUpdate() {
+    const u = S.update || {};
+    const b = $("#updBanner");
+    const t = updateText(u);
+    b.hidden = !t;
+    if (t) b.innerHTML = (t[0] ? '<span class="spinner"></span>' : "") + `<span>${esc(t[1])}</span>`;
+    const when = u.checked ? new Date(u.checked * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    const line = {
+      current: `Up to date${when ? ` (checked ${when})` : ""}`, checking: "Checking for updates…",
+      available: `v${u.latest} available`, downloading: `Downloading v${u.latest}…`, installing: `Installing v${u.latest}…`,
+      ready: `v${u.latest} installed, restarting soon`, restarting: "Restarting…", offline: "Couldn't reach GitHub; will try again",
+      failed: `Update failed: ${u.error || "unknown error"}. Will try again`, dev: "Running from source (updates come from git)",
+      idle: "",
+    }[u.state] || "";
+    $("#setVer").textContent = `UzRail Bot ${S.version}${line ? ` · ${line}` : ""}`;
+    const btn = $("#updBtn");
+    btn.textContent = u.state === "available" ? "Update now" : "Check now";
+    btn.disabled = ["checking", "downloading", "installing", "ready", "restarting", "dev"].includes(u.state);
+    $("#autoUpdate").checked = S.autoUpdate;
+  }
+  $("#updBtn").addEventListener("click", async () => {
+    await api("/api/update", { install: (S.update || {}).state === "available" });
+    toast("Checking for updates…");
+  });
+  $("#autoUpdate").addEventListener("change", async (e) => {
+    const r = await api("/api/autoupdate", { on: e.target.checked });
+    toast(r.on ? "Updates install automatically" : "You'll be told about updates; install them from here");
+  });
+
   /* ---------------------------------------------------------------- settings */
   function renderSettings() {
     const s = S;
@@ -262,7 +307,6 @@
     tg.textContent = s.telegramOk === false ? "Not reachable" : "Connected";
     $("#setAcc").textContent = s.account || "Not connected yet";
     $("#setDir").textContent = s.dataDir;
-    $("#setVer").textContent = `UzRail Bot ${s.version}`;
   }
   $("#autostart").addEventListener("change", async (e) => {
     const r = await api("/api/autostart", { on: e.target.checked });
@@ -352,7 +396,7 @@
       return;
     }
     if ($("#shell").hidden) { $("#setup").hidden = true; $("#shell").hidden = false; show(view); }
-    renderStatus(); renderTrips(); renderSettings();
+    renderStatus(); renderTrips(); renderSettings(); renderUpdate();
   }
 
   refresh();

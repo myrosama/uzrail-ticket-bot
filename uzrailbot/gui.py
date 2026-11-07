@@ -20,10 +20,11 @@ from . import __version__, autostart, paths
 from .recorder import rec
 from .store import Store
 from .telegram import TgApi, TgError
+from .updater import Updater
 
 log = logging.getLogger("uzrailbot.gui")
 UI_DIR = Path(__file__).parent / "ui"
-PORT = 47613                       # fixed, so a second copy can find the first one
+PORT = int(os.environ.get("UZRAILBOT_PORT") or 47613)   # fixed, so a second copy can find the first one
 TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".js": "application/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
 QUIET_KINDS = {"http", "check", "ws"}
@@ -53,6 +54,9 @@ class App:
         self.window = None
         self.tray = None
         self.url = ""
+        self.server = None
+        self.ui_files = {}                                   # served from memory: an update can't mix versions
+        self.updater = Updater(self.store, self._idle, self._release_for_restart)
         rec.listeners.append(self._on_event)
 
     # ---------------------------------------------------------------- services
@@ -71,8 +75,26 @@ class App:
         self.engine = Engine(self.store, self.bot)
         self.bot.start(self.engine)
         self.engine.start()
-        self.bot.send("🟢 UzRail Bot started on your PC.", self.bot.main_kb())
+        was = os.environ.get("UZRAILBOT_JUST_UPDATED")
+        self.bot.send(f"🔄 Updated to v{__version__} (was v{was}). Watching again." if was else
+                      f"🟢 UzRail Bot v{__version__} started on your PC.", self.bot.main_kb())
         log.info("services started")
+
+    def _idle(self) -> bool:
+        """Safe to restart: no booking in flight, no renewal running, no seats held."""
+        e = self.engine
+        return not self.store.state.get("holds") and (e is None or (not e.booking and not e.renewing))
+
+    def _release_for_restart(self):
+        self.stop_services()
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()                       # free the port for the new version
+        if self.tray:
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
 
     def stop_services(self):
         if self.engine:
@@ -102,6 +124,7 @@ class App:
             "owner": tg.get("owner_name", ""), "holds": holds, "trips": self.store.trips(),
             "autostart": autostart.is_enabled(), "dataDir": str(paths.app_dir()),
             "telegramOk": bool(self.bot.healthy) if self.bot else None,
+            "update": self.updater.status, "autoUpdate": bool(self.store.cfg.get("auto_update", True)),
         }
 
     # ---------------------------------------------------------------- setup (bot token + owner)
@@ -186,6 +209,13 @@ class App:
             elif target == "url" and str(body.get("url", "")).startswith("https://"):
                 webbrowser.open(body["url"])
             return {"ok": True}
+        if path == "/api/update":
+            self.updater.check_now(install=bool(body.get("install")))
+            return {"ok": True}
+        if path == "/api/autoupdate":
+            self.store.cfg["auto_update"] = bool(body.get("on"))
+            self.store.save()
+            return {"ok": True, "on": self.store.cfg["auto_update"]}
         if path == "/api/show":
             self.show()
             return {"ok": True}
@@ -230,10 +260,9 @@ class App:
                 if self.path.startswith("/api/"):
                     return self._api("GET")
                 name = self.path.split("?")[0].lstrip("/") or "index.html"
-                f = (UI_DIR / name).resolve()
-                if UI_DIR.resolve() not in f.parents or not f.is_file():
+                if name not in app.ui_files:
                     return self._send(404, b"not found", "text/plain")
-                self._send(200, f.read_bytes(), TYPES.get(f.suffix, "application/octet-stream"))
+                self._send(200, app.ui_files[name], TYPES.get(Path(name).suffix, "application/octet-stream"))
 
             def do_POST(self):
                 self._api("POST")
@@ -242,6 +271,8 @@ class App:
             server = _Server(("127.0.0.1", PORT), Handler)
         except OSError:
             return False
+        self.ui_files = {f.name: f.read_bytes() for f in UI_DIR.iterdir() if f.is_file()}
+        self.server = server
         threading.Thread(target=server.serve_forever, daemon=True, name="ui-server").start()
         (paths.data_dir() / "app.key").write_text(self.key, encoding="utf-8")
         self.url = f"http://127.0.0.1:{PORT}/#k={self.key}"
@@ -345,7 +376,8 @@ class App:
                 print("UzRail Bot is already running.")
             return
         folder = rec.open()
-        rec.ev("start", version=__version__, mode="gui")
+        rec.ev("start", version=__version__, mode="gui", updated_from=os.environ.get("UZRAILBOT_JUST_UPDATED"))
+        self.updater.start()
         log.info("UzRail Bot %s, recording to %s, UI at http://127.0.0.1:%d", __version__, folder, PORT)
         if self.store.is_configured():
             threading.Thread(target=self.start_services, daemon=True).start()

@@ -95,6 +95,7 @@
             <button class="btn primary" data-act="telegram"><svg><use href="#i-send"/></svg>Open Telegram bot</button>
           </div>
         </div>
+        <div class="banner" id="updBanner" hidden></div>
         <div id="holds"></div>
       </section>
 
@@ -145,7 +146,12 @@
           <div class="item"><div><div>Data folder</div><div class="muted small mono" id="setDir">–</div></div>
             <button class="btn ghost sm" data-act="folder"><svg><use href="#i-folder"/></svg>Open</button></div>
           <div class="item"><div><div>Version</div><div class="muted small" id="setVer">–</div></div>
-            <button class="btn ghost sm" data-open="https://github.com/myrosama/uzrail-ticket-bot">GitHub</button></div>
+            <button class="btn ghost sm" id="updBtn">Check now</button></div>
+          <div class="item">
+            <div><div>Update automatically</div>
+              <div class="muted small">New versions install in the background and restart the bot when no booking is in progress.</div></div>
+            <label class="switch"><input type="checkbox" id="autoUpdate"><span></span></label>
+          </div>
           <div class="item"><div><div>Stop the bot</div><div class="muted small">Nothing is watched until you start it again.</div></div>
             <button class="btn danger sm" id="quitBtn">Quit</button></div>
         </div>
