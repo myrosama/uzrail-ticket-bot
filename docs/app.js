@@ -385,8 +385,12 @@
       d.passengers = chosen;
       const rows = [...chosen.map((id) => S.pax.find((x) => x.i === id)), ...S.pax.filter((x) => !chosen.includes(x.i))];
       if (!S.pax.length) {
-        $("#pax").innerHTML = `<div class="muted">No saved passengers yet. Add them on eticket.uzrailpass.uz
-          (My fellow travelers), connect your account, then reopen this page.</div>`;
+        $("#pax").innerHTML = S.email && S.hasPw
+          ? `<div class="muted">Your saved passengers aren't on this page yet. Close it, send
+             <b>/start</b> in the chat, then tap <b>🚆 Trips &amp; settings</b> again (that loads a fresh list).<br>
+             No passengers saved? Add them on eticket.uzrailpass.uz → <b>My fellow travelers</b>.</div>`
+          : `<div class="muted">Connect your railway account first (the <b>Railway account</b> card on the main
+             page). Your saved passengers ("My fellow travelers" on eticket.uzrailpass.uz) then appear here.</div>`;
         return;
       }
       $("#pax").innerHTML = rows.map((p) => {

@@ -75,6 +75,7 @@ class App:
         self.engine = Engine(self.store, self.bot)
         self.bot.start(self.engine)
         self.engine.start()
+        self.engine.wait_account()               # so the keyboard's Mini App link already lists the passengers
         was = os.environ.get("UZRAILBOT_JUST_UPDATED")
         self.bot.send(f"🔄 Updated to v{__version__} (was v{was}). Watching again." if was else
                       f"🟢 UzRail Bot v{__version__} started on your PC.", self.bot.main_kb())

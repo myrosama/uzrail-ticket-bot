@@ -123,6 +123,8 @@ class Engine:
         self.offline_since = 0.0
         self.offline_alerted = False
         self.stats = {"since": time.time(), "detections": 0, "holds": 0, "missed": 0, "fastest": None}
+        self.client_lock = threading.RLock()   # one login at a time (the poller, Telegram and the app all call it)
+        self.warm_at = 0.0                     # last time we logged in just to load the saved passengers
         self._alerted = {}
 
     # ---------------------------------------------------------------- lifecycle
@@ -162,6 +164,10 @@ class Engine:
             self.client, self.live, self.friends, self.friends_at = None, None, {}, 0.0
 
     def _ensure_client(self) -> bool:
+        with self.client_lock:
+            return self._ensure_client_locked()
+
+    def _ensure_client_locked(self) -> bool:
         email, password = self.store.railway_login()
         if not email or not password:
             self._set("setup", "connect your railway account in Telegram: 🚆 Trips & settings → Account")
@@ -196,7 +202,29 @@ class Engine:
         return self.friends
 
     def passenger_list(self) -> list:
+        """Saved passengers ("My fellow travelers"). Loads them first if the account is set but they aren't
+        loaded yet (e.g. right after a restart with no active trips), so the Mini App never opens empty."""
+        email, password = self.store.railway_login()
+        if not self.friends and email and password and time.time() - self.warm_at > 20:
+            self.warm_at = time.time()
+            self._ensure_client()
         return [{"id": k, "name": _name(f)} for k, f in self.friends.items()]
+
+    def wait_account(self, timeout: float = 8) -> bool:
+        """At start-up: give the login + saved passengers a few seconds before the first message goes out."""
+        email, password = self.store.railway_login()
+        end = time.time() + timeout
+        while email and password and not self.friends and time.time() < end and not self.stop_ev.is_set():
+            time.sleep(0.25)
+        return bool(self.friends)
+
+    def _warm(self):
+        """Log in and load the saved passengers even when nothing is being watched (no trips / paused)."""
+        email, password = self.store.railway_login()
+        if email and password and (not self.friends or time.time() - self.friends_at > 900) \
+                and time.time() - self.warm_at > 60:
+            self.warm_at = time.time()
+            self._submit(self._ensure_client)
 
     def _trip_live(self, trip_id: str):
         if self.stop_ev.is_set() or self.store.cfg.get("paused"):
@@ -252,6 +280,7 @@ class Engine:
                     self._set("setup", "finish setup first")
                     time.sleep(1)
                     continue
+                self._warm()
                 if self.store.cfg.get("paused"):
                     self._set("paused", "paused")
                     time.sleep(0.5)

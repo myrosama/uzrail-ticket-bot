@@ -112,6 +112,7 @@ def run():
     engine = Engine(store, bot)
     bot.start(engine)
     engine.start()
+    engine.wait_account()
 
     def stop_all():
         engine.stop()
