@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uzrailbot"
+dynamic = ["version"]
+description = "Watches Uzbekistan Railways (eticket.uzrailpass.uz) and books seats the moment they appear; controlled from your own Telegram bot."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = [
+  "requests>=2.31",
+  "websocket-client>=1.7",
+  "cryptography>=42",
+  "pystray>=0.19",
+  "Pillow>=10",
+  "pywebview>=5",
+]
+
+[project.scripts]
+uzrailbot = "uzrailbot.__main__:main"
+
+[project.gui-scripts]
+uzrailbot-app = "uzrailbot.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/myrosama/uzrail-ticket-bot"
+
+[tool.setuptools]
+packages = ["uzrailbot", "uzrailbot.ui"]
+
+[tool.setuptools.package-data]
+"uzrailbot.ui" = ["*.html", "*.css", "*.js", "*.png", "*.ico"]
+
+[tool.setuptools.dynamic]
+version = { attr = "uzrailbot.__version__" }

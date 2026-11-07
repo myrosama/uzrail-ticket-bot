@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UzRail Bot</title>
+  <link rel="icon" href="icon.png">
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-train" viewBox="0 0 24 24"><path d="M7 3h10a3 3 0 013 3v8a3 3 0 01-3 3H7a3 3 0 01-3-3V6a3 3 0 013-3zm0 4v4h10V7H7zm1 7.5a1.2 1.2 0 100 2.4 1.2 1.2 0 000-2.4zm8 0a1.2 1.2 0 100 2.4 1.2 1.2 0 000-2.4zM7 18l-2 3h2.4l1.3-2h6.6l1.3 2H19l-2-3H7z" fill="currentColor"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-route" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="5" r="2.5"/><path d="M8.5 19H16a3.5 3.5 0 000-7H8a3.5 3.5 0 010-7h7.5"/></g></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></g></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3L3 10.5l7 2.5 2.5 7L21 3zM10 13l4.5-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5-10-6.5z" fill="currentColor"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+  </svg>
+
+  <!-- first run: link the Telegram bot -->
+  <div id="setup" class="setup" hidden>
+    <div class="setup-card">
+      <div class="setup-head">
+        <span class="mark mark-lg"><svg><use href="#i-train"/></svg></span>
+        <h1>UzRail Bot</h1>
+        <p class="muted">Watches Uzbekistan Railways tickets and books them the moment they appear.
+          You control everything from your own Telegram bot.</p>
+      </div>
+      <ol class="steps" id="steps"><li class="on">Bot token</li><li>Say hi</li><li>Done</li></ol>
+
+      <section class="step" data-step="1">
+        <h2>Create your Telegram bot</h2>
+        <ol class="howto">
+          <li>Open <b>@BotFather</b> in Telegram and send <code>/newbot</code>.</li>
+          <li>Pick any name. BotFather replies with a token like <code>123456:ABC-…</code></li>
+          <li>Paste the token here. It stays on this computer.</li>
+        </ol>
+        <label class="field">
+          <span>Bot token</span>
+          <input id="token" autocomplete="off" spellcheck="false" placeholder="123456789:AAH…">
+        </label>
+        <p class="error" id="tokenErr" hidden></p>
+        <div class="row-btns">
+          <button class="btn ghost" data-open="https://t.me/BotFather">Open BotFather</button>
+          <button class="btn primary" id="tokenBtn">Continue</button>
+        </div>
+      </section>
+
+      <section class="step" data-step="2" hidden>
+        <h2>Say hi to <span id="botName">your bot</span></h2>
+        <p class="muted">Open the bot on your phone and press <b>Start</b>. Only that Telegram account will be able to control this PC.</p>
+        <button class="btn ghost wide" id="openBot"><svg><use href="#i-send"/></svg> Open the bot in Telegram</button>
+        <div class="waiting" id="waiting"><span class="spinner"></span> Waiting for your message…</div>
+        <div class="who" id="who" hidden>
+          <div class="avatar" id="whoAvatar"></div>
+          <div><div class="who-name" id="whoName"></div><div class="muted small" id="whoSub"></div></div>
+        </div>
+        <p class="error" id="waitErr" hidden></p>
+        <div class="row-btns" id="whoBtns" hidden>
+          <button class="btn ghost" id="notMe">Not me</button>
+          <button class="btn primary" id="itsMe">Yes, that's me</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- main window -->
+  <div id="shell" class="shell" hidden>
+    <nav class="rail">
+      <div class="rail-brand"><span class="mark"><svg><use href="#i-train"/></svg></span></div>
+      <button class="nav on" data-view="status"><svg><use href="#i-pulse"/></svg><span>Status</span></button>
+      <button class="nav" data-view="trips"><svg><use href="#i-route"/></svg><span>Trips</span></button>
+      <button class="nav" data-view="activity"><svg><use href="#i-list"/></svg><span>Activity</span></button>
+      <button class="nav" data-view="settings"><svg><use href="#i-sliders"/></svg><span>Settings</span></button>
+    </nav>
+
+    <main class="content">
+      <section class="page" data-page="status">
+        <div class="hero">
+          <div class="orb" id="orb"><span class="ring"></span><span class="ring r2"></span>
+            <span class="orb-core"><svg><use href="#i-train"/></svg></span></div>
+          <h1 id="headline">Starting…</h1>
+          <p class="muted" id="subline"></p>
+          <div class="stats">
+            <div class="stat"><b id="stAge">–</b><span>last check</span></div>
+            <div class="stat"><b id="stRate">–</b><span>checks / min</span></div>
+            <div class="stat"><b id="stMs">–</b><span>response</span></div>
+          </div>
+          <div class="row-btns center">
+            <button class="btn ghost" id="pauseBtn"><svg><use href="#i-pause"/></svg><span>Pause</span></button>
+            <button class="btn primary" data-act="telegram"><svg><use href="#i-send"/></svg>Open Telegram bot</button>
+          </div>
+        </div>
+        <div id="holds"></div>
+      </section>
+
+      <section class="page" data-page="trips" hidden>
+        <header class="page-head">
+          <h1>Trips</h1>
+          <p class="muted">Add and edit trips in Telegram: open your bot and tap <b>🚆 Trips &amp; settings</b>.</p>
+        </header>
+        <div id="trips"></div>
+      </section>
+
+      <section class="page" data-page="activity" hidden>
+        <header class="page-head">
+          <h1>Activity</h1>
+          <p class="muted">What the bot did since it started. The full record is in the data folder (logs).</p>
+        </header>
+        <div class="card feed" id="feed"><p class="empty">Nothing yet.</p></div>
+      </section>
+
+      <section class="page" data-page="settings" hidden>
+        <header class="page-head"><h1>Settings</h1></header>
+        <h3 class="group">General</h3>
+        <div class="card list">
+          <div class="item">
+            <div><div>Start when I sign in to this computer</div>
+              <div class="muted small">Runs quietly in the tray so it never misses a ticket.</div></div>
+            <label class="switch"><input type="checkbox" id="autostart"><span></span></label>
+          </div>
+          <div class="item">
+            <div><div>Closing the window</div>
+              <div class="muted small">Keeps watching in the tray. Use Quit to stop the bot.</div></div>
+          </div>
+        </div>
+        <h3 class="group">Telegram</h3>
+        <div class="card list">
+          <div class="item"><div><div>Bot</div><div class="muted small" id="setBot">–</div></div>
+            <button class="btn ghost sm" data-act="telegram">Open</button></div>
+          <div class="item"><div><div>Linked to</div><div class="muted small" id="setOwner">–</div></div>
+            <span class="pill" id="setTg">–</span></div>
+        </div>
+        <h3 class="group">Railway account</h3>
+        <div class="card list">
+          <div class="item"><div><div>eticket.uzrailpass.uz</div><div class="muted small" id="setAcc">–</div></div>
+            <span class="muted small">Change it in the bot</span></div>
+        </div>
+        <h3 class="group">About</h3>
+        <div class="card list">
+          <div class="item"><div><div>Data folder</div><div class="muted small mono" id="setDir">–</div></div>
+            <button class="btn ghost sm" data-act="folder"><svg><use href="#i-folder"/></svg>Open</button></div>
+          <div class="item"><div><div>Version</div><div class="muted small" id="setVer">–</div></div>
+            <button class="btn ghost sm" data-open="https://github.com/myrosama/uzrail-ticket-bot">GitHub</button></div>
+          <div class="item"><div><div>Stop the bot</div><div class="muted small">Nothing is watched until you start it again.</div></div>
+            <button class="btn danger sm" id="quitBtn">Quit</button></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="ui.js"></script>
+</body>
+</html>

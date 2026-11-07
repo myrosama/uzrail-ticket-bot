@@ -2,9 +2,11 @@
 and every notification the engine produces (reservation with Pay link, countdown, renewals, PDF)."""
 from __future__ import annotations
 
+import base64
 import calendar
 import datetime as dt
 import html
+import json
 import logging
 import queue
 import threading
@@ -12,7 +14,7 @@ import time
 
 import requests
 
-from . import eticket
+from . import crypto, eticket
 from .classes import CLASSES, label
 from .recorder import rec
 from .store import MAX_PASSENGERS
@@ -205,15 +207,82 @@ class Bot:
             return
         if cb:
             self._callback(cb)
+        elif msg and msg.get("web_app_data"):
+            self._webapp(msg)
         elif msg and msg.get("text"):
             self._text(msg)
 
     # ---------------------------------------------------------------- keyboards
+    def miniapp_url(self) -> str:
+        """The Mini App link, with the current state in the #fragment (no server needed)."""
+        email, pw = self.store.railway_login()
+        state = {
+            "v": 1, "bot": self.store.cfg["telegram"].get("bot_username", ""), "email": email, "hasPw": bool(pw),
+            "key": crypto.public_key_b64(self.store.transport_key()),
+            "pax": [{"i": p["id"], "n": p["name"]} for p in (self.engine.passenger_list() if self.engine else [])],
+            "trips": [{k: t[k] for k in ("id", "from", "to", "dates", "classes", "maxPrice", "mode", "passengers",
+                                         "speed", "train", "together", "active")} for t in self.store.trips()],
+        }
+        raw = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        frag = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        return self.store.cfg.get("webapp_url", "").rstrip("/") + "/#s=" + frag
+
     def main_kb(self):
         paused = self.store.cfg.get("paused")
-        return {"keyboard": [[{"text": "➕ New trip"}, {"text": "🗂 My trips"}],
+        first = [{"text": "🚆 Trips & settings", "web_app": {"url": self.miniapp_url()}}]
+        return {"keyboard": [first,
                              [{"text": "📊 Status"}, {"text": "▶️ Resume" if paused else "⏸ Pause"}]],
                 "resize_keyboard": True, "is_persistent": True}
+
+    # ---------------------------------------------------------------- data coming back from the Mini App
+    def _webapp(self, msg):
+        try:
+            d = json.loads(msg["web_app_data"]["data"])
+        except (KeyError, ValueError):
+            return self.send("⚠️ I couldn't read what the app sent. Please try again.", self.main_kb())
+        act = d.get("a")
+        rec.ev("miniapp", action=act)
+        if act == "trip":
+            try:
+                t = self.store.upsert_trip(d.get("trip") or {})
+            except ValueError as e:
+                return self.send(f"⚠️ Not saved: {H(str(e))}.", self.main_kb())
+            rec.ev("trip_saved", trip=t["id"], mode=t["mode"], dates=t["dates"], classes=t["classes"],
+                   max_price=t["maxPrice"], passengers=len(t["passengers"]), speed=t["speed"],
+                   route=[t["from"]["code"], t["to"]["code"]])
+            return self.send("✅ <b>Saved. Watching now.</b>\n\n" + self._summary(t), self.main_kb())
+        if act == "toggle":
+            self.store.set_trip_active(str(d.get("id")), bool(d.get("active")))
+            return self.send("▶️ Trip resumed." if d.get("active") else "⏸ Trip paused.", self.main_kb())
+        if act == "del":
+            self.store.delete_trip(str(d.get("id")))
+            return self.send("🗑 Trip deleted.", self.main_kb())
+        if act == "account":
+            try:
+                password = crypto.decrypt_from_miniapp(self.store.transport_key(), d.get("pw", ""))
+            except Exception:
+                return self.send("⚠️ I couldn't decrypt the password. Open the app from the latest keyboard "
+                                 "button and try again.", self.main_kb())
+            email = str(d.get("email", "")).strip()
+            self.send("🔐 Checking your railway login…")
+            threading.Thread(target=self._check_account, args=(email, password), daemon=True).start()
+            return
+        self.send("⚠️ Unknown request from the app.", self.main_kb())
+
+    def _check_account(self, email, password):
+        c = eticket.Client(email, password)
+        try:
+            c.login()
+            friends = c.friends()
+        except eticket.EticketError as e:
+            return self.send(f"❌ Login failed: {H(str(e))}", self.main_kb())
+        self.store.set_railway_login(email, password)
+        self.engine.account_changed()
+        self.engine._ensure_client()
+        names = ", ".join(H(f"{f.get('firstname', '')} {f.get('lastname', '')}") for f in friends) or "none yet"
+        rec.ev("account_saved", passengers=len(friends))
+        self.send(f"✅ Connected as <b>{H(email)}</b>.\nSaved passengers: {names}\n\n"
+                  "Now open 🚆 Trips & settings and add a trip.", self.main_kb())
 
     # ---------------------------------------------------------------- text messages
     def _text(self, msg):
@@ -562,8 +631,6 @@ class Bot:
         return {"inline_keyboard": rows}
 
     def _hold_text(self, h, head="✅ <b>Seats reserved!</b>"):
-        left = h["expires_at"] - time.time()
-        until = time.strftime("%H:%M", time.localtime(h["expires_at"]))
         seats = []
         for i, name in enumerate(h["names"]):
             seat = h["seats"][i] if i < len(h["seats"]) else "?"

@@ -212,8 +212,13 @@ class Engine:
 
     # ---------------------------------------------------------------- polling
     def _poll_loop(self):
+        from .power import keep_awake
+        awake_at = 0.0
         while not self.stop_ev.is_set():
             try:
+                if time.time() - awake_at > 60:          # keep the PC awake while watching
+                    awake_at = time.time()
+                    keep_awake(self.status["state"] == "watching")
                 if not self.headless and not self.store.is_configured():
                     self._set("setup", "finish setup first")
                     time.sleep(1)
@@ -433,7 +438,6 @@ class Engine:
 
     def _book_hit(self, trip, date, hit, people, fresh) -> set:
         """Try to hold seats for `people` on one train/class. Returns the friendIds held."""
-        c = self.client
         frm, to = trip["from"]["code"], trip["to"]["code"]
         number, cls = hit["number"], hit["cls"]
         party = people[:4]

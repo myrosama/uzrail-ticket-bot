@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>UzRail Bot</title>
+  <meta name="description" content="Set up the trips your UzRail Ticket Bot watches and books.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <button class="icon-btn" id="back" aria-label="Back" hidden>
+      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M7 3h10a3 3 0 013 3v8a3 3 0 01-3 3H7a3 3 0 01-3-3V6a3 3 0 013-3zm0 4v4h10V7H7zm1 7.5a1.2 1.2 0 100 2.4 1.2 1.2 0 000-2.4zm8 0a1.2 1.2 0 100 2.4 1.2 1.2 0 000-2.4zM7 18l-2 3h2.4l1.3-2h6.6l1.3 2H19l-2-3H7z" fill="currentColor"/></svg>
+      </span>
+      <div>
+        <div class="brand-name" id="title">UzRail Bot</div>
+        <div class="brand-sub" id="subtitle">Ticket watcher</div>
+      </div>
+    </div>
+  </header>
+
+  <main id="app"></main>
+
+  <div class="bottom-bar" id="bottomBar" hidden>
+    <button class="btn btn-primary btn-block" id="primaryBtn">Save</button>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <template id="tpl-home">
+    <section class="card account-card" id="accountCard"></section>
+    <div class="section-head">
+      <h2>Your trips</h2>
+      <span class="muted" id="tripCount"></span>
+    </div>
+    <div id="tripList" class="stack"></div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

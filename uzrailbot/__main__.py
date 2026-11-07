@@ -1,4 +1,6 @@
-"""python -m uzrailbot [run | setup | report [N] | where]"""
+"""python -m uzrailbot                 desktop app (status window + tray); --background starts it hidden
+python -m uzrailbot run             console mode for servers without a desktop (setup happens in the terminal)
+python -m uzrailbot setup | report [N] | live | where | watch ..."""
 from __future__ import annotations
 
 import getpass
@@ -96,8 +98,13 @@ def run():
 
     setup_logging()
     store = Store()
-    if not store.is_configured() and not console_setup(store):
-        return
+    if not store.is_configured():
+        if not (sys.stdin and sys.stdin.isatty()):
+            logging.error("Not set up yet. Run 'uzrailbot setup' in a terminal first.")
+            time.sleep(60)            # a service manager would otherwise restart us in a tight loop
+            sys.exit(1)
+        if not console_setup(store):
+            return
     folder = rec.open()
     rec.ev("start", version=__version__)
     logging.info("UzRail Ticket Bot %s - recording this session to %s", __version__, folder)
@@ -181,6 +188,9 @@ class ConsoleNotifier:
             path.write_bytes(pdf)
         self.log.warning("PAID %s. Ticket PDF: %s", h["order"], path or "not downloaded")
         self._beep(2)
+
+    def missed(self, trip, date, hit, why):
+        self.log.warning("MISSED %s train %s %s: %s", date, hit["number"], hit["cls"], why)
 
     def seats_found(self, trip, date, hits):
         self.log.warning("SEATS FOUND %s: %s", date, [(h["number"], h["cls"], h["free"], h["price"]) for h in hits])
@@ -305,8 +315,19 @@ def main():
         except (AttributeError, ValueError):
             pass
     args = sys.argv[1:]
-    cmd = args[0] if args else "run"
-    if cmd == "setup":
+    cmd = args[0] if args else "app"
+    if cmd in ("app", "--background"):
+        from .gui import App
+        setup_logging(console=cmd == "app")
+        App(background=cmd == "--background").run()
+    elif cmd in ("run", "--headless", "headless"):
+        run()
+    elif cmd == "autostart":
+        from . import autostart
+        if len(args) > 1:
+            autostart.set_enabled(args[1] in ("on", "1", "yes"))
+        print("autostart:", "on" if autostart.is_enabled() else "off", "-", autostart.command())
+    elif cmd == "setup":
         setup_logging(console=False)
         console_setup(Store())
     elif cmd == "report":
@@ -319,7 +340,7 @@ def main():
         from .live import main as live_main
         live_main()
     else:
-        run()
+        print(__doc__)
 
 
 if __name__ == "__main__":

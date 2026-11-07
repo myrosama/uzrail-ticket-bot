@@ -19,6 +19,7 @@ class Recorder:
         self.lock = threading.Lock()
         self.f = None
         self.folder = None
+        self.listeners = []          # e.g. the desktop app's Activity feed
 
     def open(self):
         root = paths.app_dir() / "logs" / "sessions"
@@ -45,6 +46,11 @@ class Recorder:
             try:
                 self.f.write(line + "\n")
             except (OSError, ValueError):
+                pass
+        for fn in self.listeners:
+            try:
+                fn(row)
+            except Exception:
                 pass
 
 
