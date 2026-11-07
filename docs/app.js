@@ -6,7 +6,9 @@
   "use strict";
 
   const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-  const inTelegram = !!(tg && tg.initData);
+  // Opened from a keyboard button (the only way sendData works), Telegram passes NO initData;
+  // it does pass the platform (tdesktop, android, ios, weba...). Outside Telegram it is "unknown".
+  const inTelegram = !!(tg && (tg.initData || (tg.platform && tg.platform !== "unknown")));
 
   const CLASSES = [
     { c: "3П", name: "Plaskart", sub: "open sleeper" },
