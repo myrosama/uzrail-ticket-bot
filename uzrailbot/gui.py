@@ -8,6 +8,8 @@ import logging
 import os
 import secrets
 import socket
+import sys
+import subprocess
 import threading
 import time
 import webbrowser
@@ -229,7 +231,10 @@ class App:
                 webbrowser.open(f"https://t.me/{self.store.cfg['telegram'].get('bot_username', '')}")
             elif target == "folder":
                 folder = str(paths.app_dir())
-                os.startfile(folder) if os.name == "nt" else webbrowser.open("file://" + folder)
+                if os.name == "nt":
+                    os.startfile(folder)
+                else:
+                    subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", folder])
             elif target == "url" and str(body.get("url", "")).startswith("https://"):
                 webbrowser.open(body["url"])
             return {"ok": True}
@@ -366,6 +371,17 @@ class App:
         color = self._tray_color()
         self.tray = pystray.Icon("uzrailbot", self._tray_icon(color), "UzRail Bot", menu)
 
+        if sys.platform == "darwin":
+            # macOS: the menu-bar icon must live on the main thread; run_detached() hooks it into the event loop
+            # the window runs (pystray's documented way to share it). Its colour can't be changed from another
+            # thread there, so it stays as it is.
+            try:
+                self.tray.run_detached()
+            except Exception:
+                log.exception("menu-bar icon unavailable")
+                self.tray = None
+            return
+
         def run_tray():
             try:
                 self.tray.run()
@@ -418,8 +434,9 @@ class App:
                                             background_color="#F3F6FA", hidden=self.background)
 
         def on_closing():
-            # closing the window keeps the bot running in the tray
-            if self.tray is not None:
+            # closing the window keeps the bot running in the tray (on a Mac also without one: opening the app
+            # again brings the window back)
+            if self.tray is not None or sys.platform == "darwin":
                 self.window.hide()
                 return False
             return True

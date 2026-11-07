@@ -1,0 +1,96 @@
+# Runs the one-line installers on real macOS, Linux and Windows machines, starts the installed app (window
+# hidden), talks to it over its local API, quits it and uninstalls. Free for public repositories.
+name: Installers
+
+on:
+  push:
+    branches: [main, macos]
+    paths: [install.sh, install.ps1, pyproject.toml, requirements.txt, "uzrailbot/**", ".github/workflows/installers.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unix:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install from this checkout (desktop mode, not started)
+        run: bash install.sh --desktop --no-start --source="$GITHUB_WORKSPACE"
+
+      - name: Check what was installed
+        run: |
+          ~/.local/bin/uzrailbot where
+          if [ "$(uname -s)" = Darwin ]; then
+            V="$HOME/Library/Application Support/UzRailBot/venv/bin/python"
+            test -x "$HOME/Applications/UzRail Bot.app/Contents/MacOS/UzRailBot"
+            plutil -lint "$HOME/Applications/UzRail Bot.app/Contents/Info.plist"
+            ls -la "$HOME/Applications/UzRail Bot.app/Contents/Resources"
+          else
+            V="$HOME/.local/share/UzRailBot/venv/bin/python"
+            test -f "$HOME/.local/share/applications/uzrailbot.desktop"
+          fi
+          "$V" -c "import uzrailbot, uzrailbot.gui, uzrailbot.engine, uzrailbot.telegram, webview, pystray, PIL; print('imports ok, version', uzrailbot.__version__)"
+          "$V" -c "from uzrailbot import updater; assert updater.managed(), 'self-update would be off'; print('self-update: on')"
+
+      - name: Start the app (window hidden) and talk to it
+        run: |
+          if [ "$(uname -s)" = Darwin ]; then
+            H="$HOME/Library/Application Support/UzRailBot"; RUN=""
+          else
+            H="$HOME/.local/share/UzRailBot"; sudo apt-get install -y -qq xvfb >/dev/null; RUN="xvfb-run -a"
+          fi
+          $RUN ~/.local/bin/uzrailbot --background > app.log 2>&1 &
+          for i in $(seq 1 90); do [ -f "$H/data/app.key" ] && break; sleep 1; done
+          KEY=$(cat "$H/data/app.key")
+          curl -sf -X POST -H "X-App-Key: $KEY" http://127.0.0.1:47613/api/state \
+            | python3 -c "import sys, json; s = json.load(sys.stdin); print('app answers: state', s['state'], 'version', s['version'], 'update', s['update']['state'])"
+          sleep 8
+          pgrep -f "uzrailbot --background" >/dev/null && echo "app still running after 8 s"
+          curl -s -X POST -H "X-App-Key: $KEY" http://127.0.0.1:47613/api/quit; echo
+          sleep 4
+          if pgrep -f "uzrailbot --background" >/dev/null; then echo "app did not quit"; exit 1; fi
+          echo "--- app output"; tail -20 app.log || true
+          echo "--- app log"; tail -20 "$H/logs/uzrailbot.log" || true
+
+      - name: Uninstall
+        run: |
+          bash install.sh --uninstall
+          if [ -e ~/.local/bin/uzrailbot ]; then echo "launcher left behind"; exit 1; fi
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install from this checkout
+        shell: pwsh
+        run: ./install.ps1 -Source $env:GITHUB_WORKSPACE -NoLaunch -NoShortcuts
+
+      - name: Start the app (window hidden) and talk to it
+        shell: pwsh
+        run: |
+          $v = "$env:LOCALAPPDATA\UzRailBot\venv\Scripts"
+          & "$v\python.exe" -c "import uzrailbot, uzrailbot.gui, webview, pystray; from uzrailbot import updater; assert updater.managed(); print('imports ok', uzrailbot.__version__, 'self-update: on')"
+          Start-Process "$v\pythonw.exe" -ArgumentList "-m", "uzrailbot", "--background"
+          $keyFile = "$env:LOCALAPPDATA\UzRailBot\data\app.key"
+          for ($i = 0; $i -lt 90 -and -not (Test-Path $keyFile); $i++) { Start-Sleep 1 }
+          $key = (Get-Content $keyFile -Raw).Trim()
+          $s = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:47613/api/state -Headers @{ "X-App-Key" = $key }
+          "app answers: state $($s.state) version $($s.version)"
+          Start-Sleep 5
+          Invoke-RestMethod -Method Post -Uri http://127.0.0.1:47613/api/quit -Headers @{ "X-App-Key" = $key } | Out-Null
+          Get-Content "$env:LOCALAPPDATA\UzRailBot\logs\uzrailbot.log" -Tail 10
+
+      - name: Uninstall
+        shell: pwsh
+        run: ./install.ps1 -Uninstall
