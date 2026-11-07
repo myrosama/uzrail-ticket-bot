@@ -1,0 +1,13 @@
+# Never commit personal data: settings, tokens, passwords, holds, logs, tickets
+config.json
+state.json
+*.lock
+data/
+logs/
+tickets/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.log
+.env
