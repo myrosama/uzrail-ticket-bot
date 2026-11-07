@@ -116,7 +116,7 @@
   // ------------------------------------------------------------------ timetable (bundled; built by tools/build_timetable.py)
   let TT = null;
   let onTimetable = null;
-  fetch("timetable.json?v=1").then((r) => r.json()).then((t) => { TT = t; if (onTimetable) onTimetable(); })
+  fetch("timetable.json?v=2").then((r) => r.json()).then((t) => { TT = t; if (onTimetable) onTimetable(); })
     .catch(() => { TT = { trains: {}, groups: {} }; if (onTimetable) onTimetable(); });
   const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
   const codesFor = (code) => new Set((TT && TT.groups && TT.groups[code]) || [code]);
@@ -133,7 +133,7 @@
       for (let k = i + 1; k < s.length; k++) if (B.has(s[k][0])) { j = k; break; }
       if (j < 0) continue;
       out.push({ n, b: t.b || "", c: t.c || [], dep: s[i][2], arr: s[j][1] || s[j][2],
-                 nights: Math.max(0, s[j][3] - s[i][4]), fromDay: s[i][4], r: t.r || null });
+                 nights: Math.max(0, s[j][3] - s[i][4]), fromDay: s[i][4], r: t.r || null, w: t.w || null });
     }
     return out.sort((x, y) => x.dep.localeCompare(y.dep));
   }
@@ -147,6 +147,11 @@
 
   /* Does the train leave `from` on this date? true / false / null (the timetable doesn't say). */
   function runsOn(t, isoDate) {
+    if (Array.isArray(t.w) && t.w.length) {                     // weekdays seen in the railway's own lists
+      const o = new Date(isoDate + "T00:00:00");
+      o.setDate(o.getDate() - (t.fromDay || 0));
+      return t.w.includes(o.getDay());
+    }
     const r = t.r;
     if (!r) return null;
     const dt = new Date(isoDate + "T00:00:00");
@@ -165,7 +170,8 @@
     const idx = days.map(dayIndex).filter((x) => x !== undefined);
     return idx.length ? idx.includes(dt.getDay()) : null;
   }
-  const runText = (r) => {
+  const runText = (r, w) => {
+    if (Array.isArray(w) && w.length) return w.length >= 7 ? "" : w.map((i) => DAY_EN[i]).join(", ");
     if (!r) return "";
     const days = (r.daysOfWeek || []).map(String);
     if (Array.isArray(r.dates) && r.dates.length) return "on set dates";
@@ -338,7 +344,7 @@
       </section>
 
       <section class="card form-section" id="paxSection">
-        <h3>Passengers</h3>
+        <h3 class="row-head">Passengers <button class="link-btn" id="paxRefresh" type="button">↻ Refresh list</button></h3>
         <div class="pax" id="pax"></div>
         <p class="hint">Tap to choose (up to ${MAX_PAX}). The order is the priority: if fewer seats appear, the first ones get them.</p>
         <div class="divider"></div>
@@ -485,9 +491,9 @@
       const rows = [...chosen.map((id) => S.pax.find((x) => x.i === id)), ...S.pax.filter((x) => !chosen.includes(x.i))];
       if (!S.pax.length) {
         $("#pax").innerHTML = S.email && S.hasPw
-          ? `<div class="muted">Your saved passengers aren't on this page yet. Close it, send
-             <b>/start</b> in the chat, then tap <b>🚆 Trips &amp; settings</b> again (that loads a fresh list).<br>
-             No passengers saved? Add them on eticket.uzrailpass.uz → <b>My fellow travelers</b>.</div>`
+          ? `<div class="muted">Your saved passengers aren't on this page yet. Tap <b>↻ Refresh list</b> above:
+             the bot reloads them and sends you a fresh button.<br>
+             No passengers saved? Add them on eticket.uzrailpass.uz → <b>My fellow travelers</b>, then refresh.</div>`
           : `<div class="muted">Connect your railway account first (the <b>Railway account</b> card on the main
              page). Your saved passengers ("My fellow travelers" on eticket.uzrailpass.uz) then appear here.</div>`;
         return;
@@ -521,6 +527,13 @@
       });
     }
     drawPax();
+    $("#paxRefresh").onclick = () => {
+      const go = () => send({ a: "pax" });
+      const msg = "Reload your saved passengers? This page closes (unsaved changes here are lost); the bot replies " +
+                  "with the fresh list and a new 🚆 Trips & settings button.";
+      if (inTelegram && tg.showConfirm) tg.showConfirm(msg, (ok) => ok && go());
+      else if (confirm(msg)) go();
+    };
     $("#together").checked = !!d.together;
     $("#together").onchange = (e) => { d.together = e.target.checked; };
 
@@ -548,9 +561,9 @@
       const rows = routeTrains(d.from.code, d.to.code);
       const sameRoute = src && src.from.code === d.from.code && src.to.code === d.to.code;
       for (const [n, dep, arr] of (sameRoute && src.kt) || []) {         // trains the PC saw that the timetable lacks
-        if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep, arr, nights: 0, fromDay: 0, r: null });
+        if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep, arr, nights: 0, fromDay: 0, r: null, w: null });
       }
-      for (const n of d.trains) if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep: "", arr: "", nights: 0, r: null });
+      for (const n of d.trains) if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep: "", arr: "", nights: 0, r: null, w: null });
       rows.sort((x, y) => (x.dep || "99").localeCompare(y.dep || "99"));
       $("#trainCount").textContent = rows.length ? `· ${rows.length}` : "";
       if (!rows.length) {
@@ -568,7 +581,7 @@
           const some = d.dates.length && !no && runs.some((x) => x === false);
           const note = no ? `<em class="warn">doesn't run on your ${d.dates.length === 1 ? "date" : "dates"}</em>`
             : some ? `<em>runs on ${runs.filter((x) => x !== false).length} of ${d.dates.length} dates</em>`
-            : runText(t.r) ? `<em>${esc(runText(t.r))}</em>` : "";
+            : runText(t.r, t.w) ? `<em>${esc(runText(t.r, t.w))}</em>` : "";
           const cls = t.c.map((c) => `<i>${esc(shortClass(c))}</i>`).join("");
           return `<button class="train-row ${d.trains.includes(t.n) ? "on" : ""} ${no ? "dim" : ""}" data-t="${esc(t.n)}">
             <span class="tick">✓</span>

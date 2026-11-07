@@ -118,7 +118,7 @@ def run():
         engine.stop()
         bot.stop()
     from .updater import Updater
-    Updater(store, lambda: not store.state.get("holds") and not engine.booking and not engine.renewing,
+    Updater(store, lambda: not store.state.get("holds") and not engine.booking and not engine.moving_pax,
             stop_all).start()
     bot.send("🟢 Bot started on your PC. " + ("Watching your trips." if store.trips() else "Tap ➕ New trip."),
              bot.main_kb())
@@ -165,15 +165,6 @@ class ConsoleNotifier:
             import webbrowser
             webbrowser.open(h["pay_url"])
         self._beep()
-
-    def renewed(self, old, new):
-        self.log.warning("RENEWED %s -> %s seats %s. NEW PAY LINK: %s", old["order"], new["order"], new["seats"],
-                         new.get("pay_url"))
-        rec.ev("notify", what="renewed", old=old["order"], new=new["order"])
-        if self.open_pay and new.get("pay_url"):
-            import webbrowser
-            webbrowser.open(new["pay_url"])
-        self._beep(3)
 
     def hold_update(self, h):
         self.log.info("hold %s: %d s left", h["order"], int(h["expires_at"] - time.time()))

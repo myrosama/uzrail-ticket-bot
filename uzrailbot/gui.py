@@ -82,9 +82,9 @@ class App:
         log.info("services started")
 
     def _idle(self) -> bool:
-        """Safe to restart: no booking in flight, no renewal running, no seats held."""
+        """Safe to restart: no booking or transfer in flight, no seats held."""
         e = self.engine
-        return not self.store.state.get("holds") and (e is None or (not e.booking and not e.renewing))
+        return not self.store.state.get("holds") and (e is None or (not e.booking and not e.moving_pax))
 
     def _release_for_restart(self):
         self.stop_services()
@@ -112,8 +112,7 @@ class App:
         holds = []
         for h in self.store.state.get("holds", {}).values():
             holds.append({k: h.get(k) for k in ("order", "trip", "passengers", "train", "car", "seats", "seat_types",
-                                                "names", "total", "from", "to", "date", "dep", "arr", "pay_url",
-                                                "renewals", "cls")}
+                                                "names", "total", "from", "to", "date", "dep", "arr", "pay_url", "cls")}
                          | {"left": max(0, int(h["expires_at"] - now))})
         email, _ = self.store.railway_login()
         tg = self.store.cfg["telegram"]
@@ -129,7 +128,7 @@ class App:
             "update": self.updater.status, "autoUpdate": bool(self.store.cfg.get("auto_update", True)),
             "board": s.get("board", []), "stats": s.get("stats", {}), "offlineSince": s.get("offline_since") or 0,
             "pax": {p["id"]: p["name"] for p in self.engine.passenger_list()} if self.engine else {},
-            "done": self.store.state.get("done", {}), "maxRenewals": int(self.store.cfg.get("max_renewals", 3)),
+            "done": self.store.state.get("done", {}),
             "today": time.strftime("%Y-%m-%d", time.gmtime(now + 5 * 3600)),     # Tashkent date
         }
 
@@ -199,6 +198,16 @@ class App:
         if path == "/api/trip":
             ok = self.store.set_trip_active(str(body.get("id")), bool(body.get("active")))
             return {"ok": ok}
+        if path == "/api/transfer":
+            if not self.engine:
+                return {"ok": False, "error": "The bot isn't running yet."}
+            ok, msg = self.engine.transfer_hold(str(body.get("order")), str(body.get("from")), str(body.get("to")))
+            rec.ev("user_transfer", order=str(body.get("order")), ok=ok, source="app")
+            return {"ok": ok, "error": msg}
+        if path == "/api/passengers":
+            if self.engine:
+                self.engine.refresh_friends()
+            return {"ok": True, "count": len(self.engine.friends) if self.engine else 0}
         if path == "/api/console":
             from .live import open_window
             ok = open_window()

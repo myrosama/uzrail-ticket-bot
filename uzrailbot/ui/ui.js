@@ -179,7 +179,7 @@
   let holdsSig = "";
   function renderHolds() {
     const el = $("#holds");
-    const sig = JSON.stringify(S.holds.map((h) => [h.order, h.seats, h.pay_url, h.renewals]));
+    const sig = JSON.stringify([S.holds.map((h) => [h.order, h.seats, h.pay_url]), Object.keys(S.pax || {})]);
     if (sig !== holdsSig) {          // rebuild only when the holds change, so buttons stay clickable
       holdsSig = sig;
       const berth = { "В": "upper", "Н": "lower" };
@@ -200,11 +200,25 @@
           <div><span>Class</span><b>${esc(cls(h.cls))}</b></div>
           <div><span>Car</span><b>${esc(h.car)}</b></div>
           <div><span>Total</span><b>${fmtSum(h.total)} so'm</b></div>
-          <div><span>Renewals</span><b>${h.renewals || 0} of ${S.maxRenewals}</b></div>
+          <div><span>If not paid</span><b>back on sale, searched again</b></div>
         </div>
         <ul class="seats-list">${who}</ul>
+        <form class="xfer" data-xfer="${esc(h.order)}" hidden>
+          <div class="xfer-row">
+            <label>Seat of<select name="from">${(h.passengers || []).map((p, i) =>
+              `<option value="${esc(p)}">${esc((h.names || [])[i] || "Passenger")} (seat ${esc((h.seats || [])[i] || "?")})</option>`).join("")}</select></label>
+            <label>goes to<select name="to">${Object.entries(S.pax || {}).filter(([id]) => !(h.passengers || []).includes(id))
+              .map(([id, n]) => `<option value="${esc(id)}">${esc(n)}</option>`).join("") || '<option value="">no other saved passengers</option>'}</select></label>
+          </div>
+          <p class="muted small">The reservation is cancelled and the same seat is re-booked for the new passenger at
+            once. That almost always works (others see a freed seat only 2-9 s later). The new passenger also becomes #1
+            in the trip, so if someone is faster they are searched for first.</p>
+          <div class="row-btns"><button type="button" class="btn ghost sm" data-xfer-close>Back</button>
+            <button type="submit" class="btn primary sm">Move the seat</button></div>
+        </form>
         <div class="row-btns">
           <button class="btn danger sm" data-cancel="${esc(h.order)}">Cancel</button>
+          <button class="btn ghost sm" data-xfer-open="${esc(h.order)}">Transfer</button>
           ${h.pay_url ? `<button class="btn primary sm" data-open="${esc(h.pay_url)}">Pay ${fmtSum(h.total)} so'm</button>` : ""}
         </div>
       </div>`;
@@ -219,6 +233,23 @@
       if (t) t.textContent = fmtLeft(Math.max(0, h.left - elapsed));
     }
   }
+  $("#holds").addEventListener("click", (e) => {
+    const o = e.target.closest("[data-xfer-open]");
+    if (o) { $(`form[data-xfer="${CSS.escape(o.dataset.xferOpen)}"]`).hidden = false; return; }
+    const c = e.target.closest("[data-xfer-close]");
+    if (c) c.closest("form").hidden = true;
+  });
+  $("#holds").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target.closest("form[data-xfer]");
+    if (!f || !f.to.value) { toast("Choose who gets the seat"); return; }
+    const btn = f.querySelector("[type=submit]");
+    btn.disabled = true; btn.textContent = "Moving…";
+    const r = await api("/api/transfer", { order: f.dataset.xfer, from: f.from.value, to: f.to.value });
+    toast(r.ok ? "Seat moved: the new reservation is in Telegram" : r.error);
+    btn.disabled = false; btn.textContent = "Move the seat";
+    refresh();
+  });
   $("#holds").addEventListener("click", async (e) => {
     const b = e.target.closest("[data-cancel]");
     if (!b || !confirm("Cancel this reservation? The seats go back on sale and the trip is paused.")) return;
@@ -253,7 +284,8 @@
       const status = !t.active ? ["", "Paused"] : !future.length ? ["", "Dates passed"] : allDone ? ["ok", "Everyone has a ticket"]
         : held.size ? ["warn", "Seats held"] : ["ok", "Watching"];
       const pax = t.mode === "buy" ? t.passengers.map((p, i) => {
-        const tag = done.has(p) ? '<em class="okc">ticket</em>' : held.has(p) ? '<em class="warnc">seat held</em>' : "";
+        const tag = done.has(p) ? '<em class="okc">ticket</em>' : held.has(p) ? '<em class="warnc">seat held</em>'
+          : t.active && future.length ? '<em class="srch">searching</em>' : "";
         return `<li><span class="n">${i + 1}</span>${esc((S.pax || {})[p] || "Passenger")} ${tag}</li>`;
       }).join("") : "";
       const multi = t.mode === "buy" && t.passengers.length > 1;
@@ -320,8 +352,12 @@
     missed: (o) => ["bad", `Missed: ${o.why}`],
     pay_link: () => ["", "Payment link ready"],
     pay_link_fail: () => ["warn", "Could not make the payment link yet, retrying"],
-    renew_attempt: (o) => [o.result === "RESERVED" ? "ok" : "warn", o.result === "RESERVED" ? "Hold renewed for another 12 minutes" : `Renewal failed (${o.result})`],
-    renew_error: () => ["warn", "Renewal failed"],
+    transfer_start: (o) => ["", `Moving the seat in car ${o.car} of train ${o.train} to another passenger`],
+    transfer_attempt: (o) => [o.result === "RESERVED" ? "ok" : "warn", o.result === "RESERVED" ? "Seat moved to the new passenger" : `Re-booking the seat, try ${o.attempt}`],
+    transfer_error: (o) => ["bad", `Transfer failed: ${o.error}`],
+    user_transfer: (o) => [o.ok ? "ok" : "warn", o.ok ? "You moved a held seat to another passenger" : "A seat transfer didn't work"],
+    passengers_refreshed: (o) => ["", `Saved passengers reloaded (${o.count})`],
+    renew_attempt: null, renew_error: null,
     hold_end: (o) => ["warn", `Hold ended: ${o.why}`],
     recover_hold: () => ["", "Restored a held reservation after restart"],
     recover_cancel: () => ["", "Cancelled a leftover reservation from the last run"],
@@ -369,7 +405,7 @@
   }
 
   const BOOKING = new Set(["availability", "detect", "fanout", "reserve_sent", "reserve_refused", "settled", "held",
-    "extra_hold_cancelled", "seats_gone", "missed", "pay_link", "renew_attempt", "hold_end", "paid", "user_cancel_hold",
+    "extra_hold_cancelled", "seats_gone", "missed", "pay_link", "transfer_start", "transfer_attempt", "user_transfer", "hold_end", "paid", "user_cancel_hold",
     "recover_hold"]);
   let filter = "all";
   $("#filters").addEventListener("click", (e) => {

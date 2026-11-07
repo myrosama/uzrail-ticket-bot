@@ -303,3 +303,6 @@ details.more[open] summary { margin-bottom: 12px; }
 .more-classes summary { cursor: pointer; font-size: 13.5px; font-weight: 600; color: var(--ink-2); padding: 6px 0; }
 .more-classes .chips { margin-top: 8px; }
 .small { font-size: 12.5px; font-weight: 500; }
+
+.row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.link-btn { border: 0; background: none; color: var(--green-dark); font-weight: 600; font-size: 13px; padding: 4px 0; }

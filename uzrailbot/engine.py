@@ -26,7 +26,6 @@ log = logging.getLogger("uzrailbot.engine")
 BASE_INTERVAL = 0.8          # seconds between checks of one route+date at speed 1
 MAX_FANOUT = 6               # parallel reserves when seats just appeared
 ATTEMPTS_PER_DETECTION = 3
-RENEW_AT = 75                # seconds left on a hold when a renewal starts
 HOLD_UPDATE_EVERY = 60       # countdown message refresh
 PAID_STATES = ("PAYMENT_SUCCESS", "ORDER_COMPLETED_SUCCESSFULLY", "ORDER_COMPLETED")
 TZ_TASHKENT = dt.timezone(dt.timedelta(hours=5))
@@ -112,7 +111,7 @@ class Engine:
         self.polled = set()            # (trip, date) checked at least once
         self.last_notice = {}          # (trip, date) -> time of last "seats found" message
         self.learn_at = {}             # (train, cls) -> last learn attempt
-        self.renewing = set()
+        self.moving_pax = set()        # passengers in the middle of a transfer: never book them elsewhere
         self.hold_mono = {}            # order id -> monotonic deadline (immune to PC clock changes)
         self.ours = set()              # orders we cancel/replace ourselves (ignore their ORDER_FAILED)
         self.status = {"state": "starting", "detail": "", "last_check": 0.0, "checks": 0,
@@ -491,10 +490,17 @@ class Engine:
 
     # ---------------------------------------------------------------- booking
     def _remaining(self, trip) -> list:
+        """Passengers of this trip still without a seat: not paid, not held (on this trip, or on another trip
+        for the same route and date), and not in the middle of a transfer."""
         done = set(self.store.done_passengers(trip["id"]))
-        held = set()
+        held = set(self.moving_pax)
+        route = (trip["from"]["code"], trip["to"]["code"])
         for h in self.store.state["holds"].values():
             if h["trip"] == trip["id"]:
+                held.update(h["passengers"])
+                continue
+            other = self.store.trip(h["trip"])
+            if other and (other["from"]["code"], other["to"]["code"]) == route and h.get("date") in trip["dates"]:
                 held.update(h["passengers"])
         return [p for p in trip["passengers"] if p not in done and p not in held]
 
@@ -696,11 +702,10 @@ class Engine:
             "total": info.get("total") or hit["price"] * len(who),
             "dep": hit["train"].get("departureDate"), "arr": hit["train"].get("arrivalDate"),
             "from": trip["from"]["name"], "to": trip["to"]["name"],
-            "expires_at": time.time() + left, "renewals": 0, "pay_url": "", "psid": "",
+            "expires_at": time.time() + left, "pay_url": "", "psid": "",
             "took": round(took, 2), "path": path, "msg_id": None, "last_update": time.time(),
         }
-        self._attach_pay_link(hold)
-        with self.store.lock:
+        with self.store.lock:                  # record first: from now on nothing books these passengers again
             self.store.state["holds"][oid] = hold
             self.hold_mono[oid] = time.monotonic() + left
             # car numbers change by date and route: remember the car that held for THIS date
@@ -708,6 +713,9 @@ class Engine:
                 str(car["number"])] = {"carType": car.get("carType"), "service": car.get("service") or hit["cls"]}
             self.store.save()
         self._remember_pending(oid, add=False)
+        if not self._attach_pay_link(hold, attempts=1):   # the Hamkorbank page, ~0.5 s normally
+            self._submit(self._pay_link_later, oid)       # bank slow or failing: don't hold back the message
+        self.store.save()
         self.recent_held.setdefault((date, hit["number"], hit["cls"]), []).append((time.time(), len(who)))
         self.stats["holds"] += 1
         if self.stats["fastest"] is None or took < self.stats["fastest"]:
@@ -718,11 +726,11 @@ class Engine:
                  took, path)
         self.ui.reserved(hold)
 
-    def _attach_pay_link(self, hold):
+    def _attach_pay_link(self, hold, attempts: int = 3):
         bot = self.store.cfg["telegram"].get("bot_username") or ""
         ok = f"https://t.me/{bot}?start=paid_{hold['order']}" if bot else eticket.BASE
         bad = f"https://t.me/{bot}?start=payfail_{hold['order']}" if bot else eticket.BASE
-        for attempt in range(3):
+        for attempt in range(attempts):
             try:
                 t0 = time.perf_counter()
                 hold["psid"], hold["pay_url"] = eticket.make_pay_link(self.client, self.live, hold["order"], ok, bad)
@@ -733,7 +741,20 @@ class Engine:
                 time.sleep(1)
         return False
 
-    # ---------------------------------------------------------------- holds: countdown, renew, expire, paid
+    # ---------------------------------------------------------------- holds: countdown, expire, paid
+    def _pay_link_later(self, oid):
+        """Keep asking the bank for the payment page for about a minute; then put the Pay button on the message."""
+        for wait in (3, 5, 10, 15, 25):
+            time.sleep(wait)
+            h = self.store.state["holds"].get(oid)
+            if not h or h.get("pay_url"):
+                return
+            if self._attach_pay_link(h, attempts=1):
+                self.store.save()
+                h["last_update"] = time.time()
+                self.ui.hold_update(h)                    # edits the Pay message: the button now opens the bank
+                return
+
     def _hold_loop(self):
         while not self.stop_ev.is_set():
             try:
@@ -742,12 +763,10 @@ class Engine:
                         h["expires_at"] = time.time() + (self.hold_mono[oid] - time.monotonic())
                     left = h["expires_at"] - time.time()
                     if left <= 0:
+                        # No renewals: the seat goes back on sale and these passengers are searched for again,
+                        # so the watcher simply catches it (or another seat) when it shows up.
                         self._drop_hold(oid, "expired")
                         self.ui.expired(h)
-                    elif left < RENEW_AT and h["renewals"] < int(self.store.cfg.get("max_renewals", 3)) \
-                            and oid not in self.renewing:
-                        self.renewing.add(oid)
-                        self._submit(self._renew, oid)
                     elif time.time() - h.get("last_update", 0) >= HOLD_UPDATE_EVERY:
                         h["last_update"] = time.time()
                         self.ui.hold_update(h)
@@ -763,51 +782,81 @@ class Engine:
             rec.ev("hold_end", order=oid, why=why)
         return h
 
-    def _renew(self, oid):
+    def transfer_hold(self, oid, from_pid: str, to_pid: str):
+        """Give a held seat to another saved passenger: cancel the hold and at once re-book the very same
+        seat(s) with `to_pid` in place of `from_pid` (everyone else sees a freed seat only after the railway's
+        2-9 s list delay, so we are first). `to_pid` also moves to the top of the trip's priority list, so if
+        the instant re-book fails the watcher looks for them first. `from_pid` stays in the trip.
+        Returns (ok, message)."""
+        h = self.store.state["holds"].get(oid)
+        if not h or not self.client:
+            return False, "That reservation is no longer active."
+        if from_pid not in h["passengers"]:
+            return False, "That passenger isn't on this reservation."
+        if to_pid in h["passengers"]:
+            return False, "That passenger is already on this reservation."
+        if not self.friends:
+            self.refresh_friends()
+        if to_pid not in self.friends:
+            return False, "That passenger isn't in your saved passengers any more."
+        trip = self.store.trip(h["trip"])
+        if not trip:
+            return False, "The trip of this reservation was deleted."
+        new_ids = [to_pid if p == from_pid else p for p in h["passengers"]]
+        people = [self.friends[p] for p in new_ids if p in self.friends]
+        # the new passenger goes first in the trip's priority; the old one stays (searched for again)
+        order = [to_pid] + [p for p in trip["passengers"] if p != to_pid]
+        if len(order) > 4:
+            order = [p for p in order if p != from_pid][:4]
+        trip = self.store.upsert_trip(dict(trip, passengers=order))
+        trains = self.client.trains(h["date"], trip["from"]["code"], trip["to"]["code"])
+        train = next((t for t in trains if t["number"] == h["train"]), None)
+        if not train:
+            return False, f"Train {h['train']} is no longer listed, so the seat can't be moved."
+        price = int((h.get("total") or 0) / max(1, len(h["passengers"])))
+        hit = {"number": h["train"], "cls": h["cls"], "price": price, "free": len(new_ids), "train": train}
+        car = {"number": h["car"], **(h.get("car_info") or {})}
+        seats = sorted(int(x) for x in h.get("seats") or [] if str(x).isdigit())
+        rng = f"{seats[0]}-{seats[-1]}" if seats else "1-99"
+        self.moving_pax.update(h["passengers"] + new_ids)
         try:
-            old = self.store.state["holds"].get(oid)
-            if not old:
-                return
-            trip = self.store.trip(old["trip"])
-            people = [self.friends[p] for p in old["passengers"] if p in self.friends]
-            if not trip or not people:
-                return
-            trains = self.client.trains(old["date"], trip["from"]["code"], trip["to"]["code"])
-            train = next((t for t in trains if t["number"] == old["train"]), None)
-            if not train:
-                self.ui.problem(f"Couldn't renew the hold on train {old['train']}; it ends at its deadline.")
-                return
-            hit = {"number": old["train"], "cls": old["cls"], "price": 0, "free": 1, "train": train}
-            car = {"number": old["car"], **old["car_info"]}
-            t0 = time.time()
-            new_oid = self._reserve(trip, hit, car, "1-99", people)
-            res, data = eticket.settle(self.client, new_oid, self.live, timeout=10, since=t0) if new_oid else ("NONE", {})
-            rec.ev("renew_attempt", old=oid, new=new_oid, result=res)
-            if res != "RESERVED":
-                if new_oid:
-                    self._remember_pending(new_oid, add=False)
-                self.ui.problem(f"No free seat to renew the hold in car {old['car']}; the current hold ends "
-                                "at its deadline unless you pay.")
-                return
             self.ours.add(oid)
+            t0 = time.time()
             self.client.cancel(oid)
-            self._drop_hold(oid, "renewed")
-            info = eticket.snapshot_summary(data) if data.get("items") else eticket.order_details(self.client, new_oid)
-            left = self.client.seconds_left(new_oid) or 720
-            new = dict(old, order=new_oid, seats=info.get("seats") or [], expires_at=time.time() + left,
-                       renewals=old["renewals"] + 1, last_update=time.time(), msg_id=None)
-            self._attach_pay_link(new)
-            with self.store.lock:
-                self.store.state["holds"][new_oid] = new
-                self.hold_mono[new_oid] = time.monotonic() + left
-                self.store.save()
-            self._remember_pending(new_oid, add=False)
-            self.ui.renewed(old, new)
-        except Exception as e:
-            log.exception("renew %s", oid)
-            rec.ev("renew_error", order=oid, error=f"{type(e).__name__}: {e}"[:200])
+            self._drop_hold(oid, "transferred")
+            rec.ev("transfer_start", order=oid, train=h["train"], car=h["car"], range=rng)
+            # re-booking before the railway has released the seat just fails (measured: the release came 70 ms
+            # after the cancel; a reserve sent at 49 ms failed and cost a whole extra round of ~1.8 s)
+            if self.live is not None and self.live.connected:
+                self.live.wait_for(lambda d: eticket._ev_order(d) == oid and d.get("state") in eticket.FAILED_STATES,
+                                   timeout=1.5, since=t0 - 1)
+            # The railway confirms the release within ~0.1 s but the seat is bookable only ~1-2 s later
+            # (measured), so send staggered attempts and keep the first that holds; _settle_many cancels any
+            # extra hold. Two rounds at most.
+            winner = None
+            for rnd in range(2):
+                orders, ts = {}, time.time()
+                for k, delay in enumerate((0.1, 0.5, 0.9, 1.3, 1.8)):
+                    time.sleep(max(0.0, ts + delay - time.time()))
+                    new_oid = self._reserve(trip, hit, car, rng, people)
+                    if new_oid:
+                        orders[new_oid] = (car, people, "transfer")
+                winner = self._settle_many(orders, ts) if orders else None
+                rec.ev("transfer_attempt", attempt=rnd + 1, sent=len(orders), result="RESERVED" if winner else "FAILED",
+                       ms=round((time.time() - t0) * 1000))
+                if winner:
+                    break
+            if not winner:
+                return False, ("The seat was released but someone else took it first. I'm searching for both "
+                               "passengers again, the new one first.")
+            new_oid, wcar, who, data, path = winner
+            self._finalize(trip, h["date"], hit, new_oid, wcar, who, data, time.time() - t0, "transfer")
+            return True, ""
+        except EticketError as e:
+            rec.ev("transfer_error", order=oid, error=str(e)[:200])
+            return False, f"The railway refused: {e}"
         finally:
-            self.renewing.discard(oid)
+            self.moving_pax.difference_update(h["passengers"] + new_ids)
 
     def _on_live(self, d):
         oid = eticket._ev_order(d)
@@ -866,8 +915,9 @@ class Engine:
     def snapshot(self) -> dict:
         holds = []
         for h in self.store.state["holds"].values():
-            holds.append({k: h.get(k) for k in ("order", "train", "car", "seats", "names", "total", "from", "to",
-                                                "date", "renewals")} | {"left": max(0, int(h["expires_at"] - time.time()))})
+            holds.append({k: h.get(k) for k in ("order", "trip", "passengers", "train", "car", "seats", "seat_types",
+                                                "names", "total", "from", "to", "date", "dep", "arr", "cls", "pay_url")}
+                         | {"left": max(0, int(h["expires_at"] - time.time()))})
         active = {(t["from"]["code"], t["to"]["code"], d) for t in self.store.trips() if t["active"] for d in t["dates"]}
         board = [{"from": k[0], "to": k[1], "date": k[2], **v} for k, v in list(self.board.items()) if k in active]
         return dict(self.status, holds=holds, trips=self.store.trips(), board=board, stats=dict(self.stats),

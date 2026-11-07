@@ -53,13 +53,24 @@ menu, and opens it. Run the same line again to update.
 1. **🎫 Tickets appeared**: the train, class, seats and price.
 2. **✅ Seats reserved**, with car, seats and passengers. If someone else was faster, you get **❌ Not this
    time** and the bot keeps watching.
-3. **💳 Pay** button with a countdown. The railway holds seats for about 12 minutes. If you haven't paid by
-   then, the bot re-reserves up to 3 times. After payment it sends the **ticket PDF**.
+3. **💳 Pay** button with a countdown. The railway holds seats for about 12 minutes. After payment the bot
+   sends the **ticket PDF**.
+   - Not paid in time? The seats go back on sale, those passengers go back on the search list, and the bot
+     catches the seat again if it reappears.
+   - **🔄 Transfer to another passenger** gives a held seat to someone else from your saved passengers. The
+     bot cancels the reservation and at once re-books the same seat for them. Others see a freed seat only
+     2–9 s later; measured on the live site, the seat was held again about 2 s after the release. The new
+     passenger also becomes #1 in the trip.
 
-**📊 Status** shows what the railway has right now:
-- every train on your dates, with departure → arrival and free seats per class;
-- whether a class is over your maximum price;
-- any seats held for you and the time left to pay.
+**📊 Status** shows every trip passenger by passenger:
+- held: where (train, car, seat, berth), departure → arrival, and the time left to pay;
+- searching;
+- ticket bought.
+
+It also shows what the railway has right now: every train on your dates with departure → arrival and free
+seats per class, and whether a class is over your maximum price.
+
+`/passengers` (or **↻ Refresh list** in the mini app) reloads your saved passengers from the railway site.
 
 If this PC loses its internet for more than 2 minutes, the bot tells you, and tells you again when it's back.
 
@@ -71,7 +82,7 @@ the tray.
 
 | Page | |
 | --- | --- |
-| Status | What the bot is doing, last check, checks per minute, the railway's response time and holds this session. Held seats show passengers, berths, the countdown and Pay / Cancel. **Right now on the railway site** is the live board: each train's times and free seats per class, colour-coded (matches your trip / over your max price / sold out / not chosen). A red banner appears when the internet drops. |
+| Status | What the bot is doing, last check, checks per minute, the railway's response time and holds this session. Held seats show passengers, berths, the countdown and Pay / Transfer / Cancel. **Right now on the railway site** is the live board: each train's times and free seats per class, colour-coded (matches your trip / over your max price / sold out / not chosen). A red banner appears when the internet drops. |
 | Trips | Each trip's status (watching, paused, seats held, everyone has a ticket, dates passed), its dates, classes, price limit and train filter, and passengers in priority order with who already has a seat. Pause, resume or delete. |
 | Activity | Every detection and booking step in plain words, with **Seats & bookings** and **Problems** filters. Repeats are folded into ×N. |
 | Live console | One click (Status, Activity, or the tray menu) opens a console window with everything as it happens: every check (one line each), requests, the railway's live order events, and every booking step. |
@@ -150,7 +161,7 @@ python tools/make_icons.py                             # regenerate the icons
 ```
 
 `uzrailbot/` is the bot:
-- `engine.py`: watch, book, hold, renew.
+- `engine.py`: watch, book, hold, transfer.
 - `eticket.py`: the railway API client.
 - `telegram.py`: the bot.
 - `gui.py` and `ui/`: the desktop window and tray.

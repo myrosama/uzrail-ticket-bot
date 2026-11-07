@@ -40,6 +40,8 @@ BIG = {
     "account_saved": (GREEN, "ACCOUNT"), "miniapp": (DIM, "MINI APP"), "returned_from_bank": (CYAN, "BANK"),
     "update_found": (CYAN, "UPDATE"), "update_installed": (GREEN, "UPDATE"), "update_restart": (CYAN, "UPDATE"),
     "update_failed": (RED, "UPDATE"), "pdf_fail": (RED, "PDF-FAIL"),
+    "transfer_start": (MAGENTA, "TRANSFER"), "transfer_attempt": (MAGENTA, "TRANSFER"), "transfer_error": (RED, "TRANSFER"),
+    "user_transfer": (YELLOW, "YOU TRANSFER"), "passengers_refreshed": (BLUE, "PASSENGERS"),
 }
 CLASS_LEGEND = "3П plaskart · 2К kupe · 1Л SV · 1А lux · 2Е/1С/2В/1В sitting"
 

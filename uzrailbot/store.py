@@ -21,7 +21,6 @@ CONFIG_DEFAULTS = {
     "railway": {"email": "", "password": ""},
     "webapp_url": DEFAULT_WEBAPP_URL,
     "paused": False,
-    "max_renewals": 3,
     "auto_update": True,
     "trips": [],
     "transport_key": "",

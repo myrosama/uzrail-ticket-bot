@@ -1,5 +1,5 @@
 """Telegram side: long polling (no server needed), owner-only control, guided trip setup in chat,
-and every notification the engine produces (reservation with Pay link, countdown, renewals, PDF)."""
+and every notification the engine produces (reservation with Pay link, countdown, transfer, PDF)."""
 from __future__ import annotations
 
 import base64
@@ -199,6 +199,7 @@ class Bot:
                 {"command": "trips", "description": "My trips"},
                 {"command": "status", "description": "What the bot is doing"},
                 {"command": "account", "description": "Railway site login"},
+                {"command": "passengers", "description": "Reload my saved passengers"},
                 {"command": "pause", "description": "Pause everything"},
                 {"command": "resume", "description": "Resume"},
                 {"command": "help", "description": "How it works"},
@@ -291,6 +292,8 @@ class Bot:
         if act == "toggle":
             self.store.set_trip_active(str(d.get("id")), bool(d.get("active")))
             return self.send("▶️ Trip resumed." if d.get("active") else "⏸ Trip paused.", self.main_kb())
+        if act == "pax":
+            return self.refresh_passengers()
         if act == "del":
             self.store.delete_trip(str(d.get("id")))
             return self.send("🗑 Trip deleted.", self.main_kb())
@@ -356,6 +359,8 @@ class Bot:
             self.store.save()
             rec.ev("user_resume")
             return self.send("▶️ Watching again.", self.main_kb())
+        if low in ("/passengers", "/pax"):
+            return self.refresh_passengers()
         if low == "/account":
             self.wiz = {"kind": "account", "step": "email"}
             return self.send("Send the <b>email</b> you use on eticket.uzrailpass.uz:")
@@ -525,6 +530,8 @@ class Bot:
             self.edit(mid, "▶️ Watching that trip again.")
         elif kind == "tr":
             self._train_pick(arg, mid)
+        elif kind in ("xfer", "xfrom", "xto", "xgo", "xback"):
+            self._transfer_cb(kind, arg, mid)
         elif kind == "paylink":
             h = self.engine.new_pay_link(arg)
             self.send("🔁 New payment link ready." if h else "Couldn't make a new link; the hold may have ended.",
@@ -663,49 +670,108 @@ class Bot:
         else:
             self.send(text, {"inline_keyboard": rows})
 
+    def refresh_passengers(self):
+        if not self.engine:
+            return
+        self.engine.refresh_friends()
+        pax = self.engine.passenger_list()
+        rec.ev("passengers_refreshed", count=len(pax))
+        names = "\n".join(f"• {H(p['name'])}" for p in pax) or "none yet"
+        self.send(f"👥 <b>Saved passengers: {len(pax)}</b>\n{names}\n\nOpen 🚆 Trips & settings again to use the new list. "
+                  "To add someone, use eticket.uzrailpass.uz → My fellow travelers, then send /passengers.", self.main_kb())
+
     def show_status(self):
         self.send(self.status_text(), self.main_kb())
 
     def status_text(self) -> str:
+        """Per trip: every passenger and what is happening for them (held where and until when, ticket bought,
+        searching), then what the railway has right now on its dates."""
         s = self.engine.snapshot()
         age = time.time() - s["last_check"] if s["last_check"] else None
         head = {"watching": "🟢 <b>Watching</b>", "paused": "⏸ <b>Paused</b>", "idle": "⚪ <b>No active trips</b>",
                 "offline": "🔴 <b>No connection</b>", "setup": "🟡 <b>Almost ready</b>", "error": "🔴 <b>Problem</b>",
                 "maintenance": "🟠 <b>Railway site in maintenance</b>"}.get(s["state"], H(s["state"]))
         lines = [head + (f" · last check {age:.1f} s ago" if age is not None and age < 120 else "")]
-        if s["state"] not in ("watching",) and s["detail"]:
+        if s["state"] != "watching" and s["detail"]:
             lines.append(H(s["detail"]))
-        for h in s["holds"]:
-            lines.append(f"⏳ <b>Held</b>: train {H(h['train'])}, car {H(h['car'])}, seat "
-                         f"{H(', '.join(h['seats']) or '?')} · <b>{fmt_left(h['left'])}</b> left to pay")
-        names = {}
-        for t in s["trips"]:
+        names = {p["id"]: p["name"] for p in self.engine.passenger_list()}
+        today = dt.datetime.now(dt.timezone(dt.timedelta(hours=5))).date().isoformat()
+        holds = list(s["holds"])
+        shown_holds = set()
+        trips = sorted(s["trips"], key=lambda t: not t["active"])
+        for t in trips:
+            future = [d for d in sorted(t["dates"]) if d >= today]
+            state = "" if t["active"] else " · ⏸ paused"
+            lines.append(f"\n🚆 <b>{H(t['from']['name'].title())} → {H(t['to']['name'].title())}</b>{state}")
+            lines.append("📅 " + (", ".join(fmt_day(d) for d in future) or "no dates left"))
+            cls = ", ".join(short_label(c) for c in t["classes"]) or "any class"
+            price = f"up to {fmt_sum(t['maxPrice'])}" if t["maxPrice"] else "any price"
+            trains = "only " + ", ".join(H(n) for n in t["trains"]) if t.get("trains") else "all trains"
+            lines.append(f"🎫 {cls} · {price} · {trains} · {'auto-buy' if t['mode'] == 'buy' else 'notify only'}")
+            if t["mode"] == "buy":
+                done = set((self.store.state.get("done") or {}).get(t["id"]) or [])
+                route = (t["from"]["code"], t["to"]["code"])
+                for i, pid in enumerate(t["passengers"], 1):
+                    who = H(names.get(pid, "Passenger"))
+                    h = next((h for h in holds if pid in (h.get("passengers") or []) and (h.get("trip") == t["id"] or (
+                        (self.store.trip(h.get("trip")) or {}).get("from", {}).get("code"),
+                        (self.store.trip(h.get("trip")) or {}).get("to", {}).get("code")) == route)), None)
+                    if pid in done:
+                        what = "✅ ticket bought"
+                    elif h:
+                        shown_holds.add(h["order"])
+                        k = h["passengers"].index(pid)
+                        seat = (h.get("seats") or [])[k] if k < len(h.get("seats") or []) else "?"
+                        berth = {"В": " upper", "Н": " lower"}.get(((h.get("seat_types") or []) + [None] * 9)[k], "")
+                        when = fmt_trip_time(h.get("dep"), h.get("arr")) or fmt_day(h.get("date", ""))
+                        what = (f"⏳ <b>seat held</b>: train {H(h['train'])}, car {H(h['car'])}, seat {H(str(seat))}{berth}"
+                                f" · {when} · <b>pay within {fmt_left(h['left'])}</b>")
+                    elif t["active"] and future:
+                        what = "🔎 searching"
+                    else:
+                        what = "⏸ not searching"
+                    lines.append(f"   {i}. {who}: {what}")
             if t["active"]:
-                names[(t["from"]["code"], t["to"]["code"])] = (t["from"]["name"].title(), t["to"]["name"].title(), t)
-        for b in sorted(s.get("board", []), key=lambda b: (b["from"], b["to"], b["date"])):
-            frm, to, t = names.get((b["from"], b["to"]), (b["from"], b["to"], None))
-            lines.append(f"\n🚆 <b>{H(frm)} → {H(to)}</b> · {fmt_day(b['date'])}")
-            shown = 0
-            for tr in sorted(b["trains"], key=lambda r: str(r["dep"])[-5:]):
-                if t and t.get("trains") and tr["number"] not in t["trains"]:
-                    continue
-                cells = []
-                for c, v in tr["classes"].items():
-                    if t and t["classes"] and c not in t["classes"]:
+                for d in future[:3]:
+                    b = next((b for b in s.get("board", []) if (b["from"], b["to"], b["date"]) ==
+                              (t["from"]["code"], t["to"]["code"], d)), None)
+                    if not b:
                         continue
-                    pricey = t and t["maxPrice"] and v["price"] > t["maxPrice"]
-                    cells.append(f"{short_label(c)} <b>{v['free']}</b>" + (" (over max price)" if pricey and v["free"] else ""))
-                lines.append(f"<code>{H(tr['number']):<5}</code> {H(str(tr['dep'])[-5:])}→{H(str(tr['arr'])[-5:])}  "
-                             + (" · ".join(cells) or ("sold out" if not tr["classes"] else "no seats in your classes")))
-                shown += 1
-            if not shown:
-                lines.append("no trains on this date")
+                    rows = []
+                    for tr in sorted(b["trains"], key=lambda r: str(r["dep"])[-5:]):
+                        if t.get("trains") and tr["number"] not in t["trains"]:
+                            continue
+                        cells = []
+                        for c, v in tr["classes"].items():
+                            if t["classes"] and c not in t["classes"]:
+                                continue
+                            pricey = t["maxPrice"] and v["price"] > t["maxPrice"]
+                            cells.append(f"{short_label(c)} <b>{v['free']}</b>" + (" (over max price)" if pricey and v["free"] else ""))
+                        rows.append(f"<code>{H(tr['number']):<5}</code> {H(str(tr['dep'])[-5:])}→{H(str(tr['arr'])[-5:])}  "
+                                    + (" · ".join(cells) or ("sold out" if not tr["classes"] else "no seats in your classes")))
+                    lines.append(f"   <i>Right now, {fmt_day(d)}:</i>")
+                    lines.extend("   " + r for r in rows[:8]) if rows else lines.append("   no trains on this date")
+                    if len(rows) > 8:
+                        lines.append(f"   … and {len(rows) - 8} more trains (see the PC app)")
+        for h in holds:                                   # holds whose trip was deleted
+            if h["order"] not in shown_holds:
+                lines.append(f"\n⏳ <b>Held</b>: {', '.join(H(n) for n in h.get('names') or [])} · train {H(h['train'])}, "
+                             f"car {H(h['car'])}, seat {H(', '.join(h.get('seats') or []) or '?')} · "
+                             f"<b>pay within {fmt_left(h['left'])}</b>")
+        if not trips:
+            lines.append("\nNo trips yet: tap 🚆 Trips & settings to add one.")
         st = s.get("stats") or {}
         if st.get("detections") or st.get("holds"):
             fast = f" · fastest hold {st['fastest']} s" if st.get("fastest") else ""
-            lines.append(f"\n📈 Since start: {st['detections']} detections · {st['holds']} holds · "
-                         f"{st['missed']} missed{fast}")
-        return "\n".join(lines)
+            lines.append(f"\n📈 Since start: {st['detections']} detections · {st['holds']} holds · {st['missed']} missed{fast}")
+        out, size = [], 0                               # Telegram allows 4096 characters; cut at a line
+        for line in lines:
+            if size + len(line) > 3900:
+                out.append("… (more in the PC app)")
+                break
+            out.append(line)
+            size += len(line) + 1
+        return "\n".join(out)
 
     # ---------------------------------------------------------------- which trains (after a trip is saved)
     def offer_trains(self, trip_id, edit_mid=None):
@@ -773,8 +839,53 @@ class Bot:
             rows.append([{"text": f"💳 Pay {fmt_sum(h['total'])} so'm", "url": h["pay_url"]}])
         else:
             rows.append([{"text": "🔁 Get a payment link", "callback_data": f"paylink:{h['order']}"}])
-        rows.append([{"text": "❌ Cancel reservation", "callback_data": f"cancel:{h['order']}"}])
+        rows.append([{"text": "🔄 Transfer to another passenger", "callback_data": f"xfer:{h['order']}"},
+                     {"text": "❌ Cancel", "callback_data": f"cancel:{h['order']}"}])
         return {"inline_keyboard": rows}
+
+    def _transfer_cb(self, kind, arg, mid):
+        """Give a held seat to another saved passenger: pick who gives it up (if several), who gets it, confirm."""
+        parts = arg.split(":")
+        oid = parts[0]
+        h = self.store.state["holds"].get(oid)
+        if kind == "xback":
+            return self.edit(mid, self._pay_text(h), self._hold_kb(h)) if h else self.edit(mid, "This reservation ended.")
+        if not h:
+            return self.edit(mid, "This reservation is no longer active.")
+        names = {p["id"]: p["name"] for p in self.engine.passenger_list()}
+        back = [{"text": "↩️ Back", "callback_data": f"xback:{oid}"}]
+        seat_of = {pid: (h["seats"][i] if i < len(h.get("seats") or []) else "?") for i, pid in enumerate(h["passengers"])}
+        if kind == "xfer" and len(h["passengers"]) > 1:
+            rows = [[{"text": f"{names.get(pid, 'Passenger')} (seat {seat_of[pid]})", "callback_data": f"xfrom:{oid}:{pid}"}]
+                    for pid in h["passengers"]] + [back]
+            return self.edit(mid, "🔄 <b>Transfer a seat</b>\nWhose seat should go to someone else?", {"inline_keyboard": rows})
+        if kind in ("xfer", "xfrom"):
+            frm = parts[1] if kind == "xfrom" else h["passengers"][0]
+            others = [p for p in self.engine.passenger_list() if p["id"] not in h["passengers"]]
+            if not others:
+                return self.edit(mid, "No other saved passengers to give the seat to. Add them on eticket.uzrailpass.uz "
+                                      "(My fellow travelers), then send /passengers.", {"inline_keyboard": [back]})
+            rows = [[{"text": f"→ {p['name']}", "callback_data": f"xto:{oid}:{frm}:{p['id']}"}] for p in others[:12]] + [back]
+            return self.edit(mid, f"🔄 <b>Transfer seat {H(str(seat_of.get(frm, '?')))}</b> of "
+                                  f"{H(names.get(frm, 'this passenger'))}\nWho should get it?", {"inline_keyboard": rows})
+        frm, to = parts[1], parts[2]
+        if kind == "xto":
+            return self.edit(mid, (
+                f"🔄 Move seat <b>{H(str(seat_of.get(frm, '?')))}</b> (train {H(h['train'])}, car {H(h['car'])}) from "
+                f"<b>{H(names.get(frm, '?'))}</b> to <b>{H(names.get(to, '?'))}</b>?\n\n"
+                "I cancel this reservation and at once re-book the same seat for the new passenger. That almost always "
+                "works: everyone else sees a freed seat only 2-9 s later. If someone is faster anyway, I search for both "
+                f"again, {H(names.get(to, 'the new passenger'))} first."),
+                {"inline_keyboard": [[{"text": "✅ Move the seat", "callback_data": f"xgo:{oid}:{frm}:{to}"}], back]})
+        # xgo: do it (takes a few seconds), without blocking the chat
+        self.edit(mid, f"🔄 Moving the seat to <b>{H(names.get(to, '?'))}</b>…")
+
+        def go():
+            ok, msg = self.engine.transfer_hold(oid, frm, to)
+            rec.ev("user_transfer", order=oid, ok=ok, source="telegram")
+            self.edit(mid, f"🔄 Seat moved to <b>{H(names.get(to, '?'))}</b>. The new reservation is below: pay there."
+                      if ok else f"⚠️ {H(msg)}")
+        threading.Thread(target=go, daemon=True).start()
 
     def _hold_text(self, h, head="✅ <b>Seats reserved!</b>"):
         seats = []
@@ -792,10 +903,10 @@ class Bot:
     def _pay_text(self, h):
         left = h["expires_at"] - time.time()
         until = time.strftime("%H:%M", time.localtime(h["expires_at"]))
-        renew = (f"\nRenewal {h['renewals']}/{self.store.cfg.get('max_renewals', 3)}" if h.get("renewals") else "")
         return (f"💳 <b>Pay {fmt_sum(h['total'])} so'm</b> for train {H(h['train'])}, car {H(h['car'])}, "
                 f"seat{'s' if len(h['seats']) > 1 else ''} {H(', '.join(h['seats']) or '?')}\n"
-                f"⏳ <b>{fmt_left(left)}</b> left (until {until}). Unpaid seats are released.{renew}")
+                f"⏳ <b>{fmt_left(left)}</b> left (until {until}). Not paid in time: the seats go back on sale and "
+                "I start searching again.")
 
     def reserved(self, h):
         # message 2 of 3 (success), then message 3 of 3 (payment with the Pay button)
@@ -815,20 +926,13 @@ class Bot:
         if h.get("msg_id"):
             self.edit(h["msg_id"], self._pay_text(h), self._hold_kb(h))
 
-    def renewed(self, old, new):
-        if old.get("msg_id"):
-            self.edit(old["msg_id"], "🔁 This hold was renewed; use the newest message to pay.")
-        def remember(mid):
-            if new["order"] in self.store.state["holds"]:
-                self.store.state["holds"][new["order"]]["msg_id"] = mid
-                self.store.save()
-        self.send(self._hold_text(new, head="🔁 <b>Hold renewed</b> (seats may have changed)"))
-        self.send(self._pay_text(new), self._hold_kb(new), on_sent=remember)
-
     def expired(self, h):
         if h.get("msg_id"):
             self.edit(h["msg_id"], "⌛ This reservation expired unpaid; the seats were released.")
-        self.send(f"⌛ The hold on train {H(h['train'])} expired unpaid. I keep watching for seats.")
+        who = ", ".join(H(n) for n in h.get("names") or []) or "these passengers"
+        self.send(f"⌛ The hold on train {H(h['train'])} (car {H(h['car'])}, seat{'s' if len(h.get('seats') or []) > 1 else ''} {H(', '.join(h.get('seats') or []) or '?')}) "
+                  f"expired unpaid and went back on sale. I'm searching again for {who}, and I'll grab the seat if it "
+                  "shows up again.")
 
     def released(self, h, reason):
         if h.get("msg_id"):
