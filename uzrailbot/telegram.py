@@ -861,11 +861,13 @@ class Bot:
             return self.edit(mid, "🔄 <b>Transfer a seat</b>\nWhose seat should go to someone else?", {"inline_keyboard": rows})
         if kind in ("xfer", "xfrom"):
             frm = parts[1] if kind == "xfrom" else h["passengers"][0]
-            others = [p for p in self.engine.passenger_list() if p["id"] not in h["passengers"]]
+            others = self.engine.transfer_targets(oid)
             if not others:
-                return self.edit(mid, "No other saved passengers to give the seat to. Add them on eticket.uzrailpass.uz "
-                                      "(My fellow travelers), then send /passengers.", {"inline_keyboard": [back]})
-            rows = [[{"text": f"→ {p['name']}", "callback_data": f"xto:{oid}:{frm}:{p['id']}"}] for p in others[:12]] + [back]
+                return self.edit(mid, "No other saved passenger can take this seat (everyone else already has a seat "
+                                      "or a ticket). Add people on eticket.uzrailpass.uz (My fellow travelers), then "
+                                      "send /passengers.", {"inline_keyboard": [back]})
+            rows = [[{"text": f"→ {p['name']} · " + (f"#{p['pos']} in this trip" if p["pos"] else "not in this trip"),
+                      "callback_data": f"xto:{oid}:{frm}:{p['id']}"}] for p in others[:12]] + [back]
             return self.edit(mid, f"🔄 <b>Transfer seat {H(str(seat_of.get(frm, '?')))}</b> of "
                                   f"{H(names.get(frm, 'this passenger'))}\nWho should get it?", {"inline_keyboard": rows})
         frm, to = parts[1], parts[2]

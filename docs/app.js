@@ -548,9 +548,12 @@
 
     // trains: every train by default; tap some to watch only those
     let routeKey = d.from && d.to ? d.from.code + ">" + d.to.code : "";
+    let showAll = false;
+    const TAG = { "3П": "Plaskart", "2К": "Kupe", "1Л": "SV", "1А": "Lux", "2Е": "Sit eco", "1С": "Sit biz", "2В": "Sit 2nd", "1В": "Sit 1st" };
+    const tag = (c) => TAG[c] || shortClass(c);
     function drawTrains() {
       const key = d.from && d.to ? d.from.code + ">" + d.to.code : "";
-      if (key !== routeKey) { d.trains = []; routeKey = key; }          // a new route: back to all trains
+      if (key !== routeKey) { d.trains = []; routeKey = key; showAll = false; }   // a new route: back to all trains
       const list = $("#trainList");
       if (!key) {
         list.innerHTML = `<p class="placeholder">Pick <b>From</b> and <b>To</b> to see the trains on this route, their times and classes.</p>`;
@@ -564,7 +567,9 @@
         if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep, arr, nights: 0, fromDay: 0, r: null, w: null });
       }
       for (const n of d.trains) if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep: "", arr: "", nights: 0, r: null, w: null });
-      rows.sort((x, y) => (x.dep || "99").localeCompare(y.dep || "99"));
+      // trains that don't run on the chosen dates go last; then by departure time
+      const off = (t) => d.dates.length && d.dates.every((x) => runsOn(t, x) === false) ? 1 : 0;
+      rows.sort((x, y) => off(x) - off(y) || (x.dep || "99").localeCompare(y.dep || "99"));
       $("#trainCount").textContent = rows.length ? `· ${rows.length}` : "";
       if (!rows.length) {
         list.innerHTML = `<p class="placeholder">No trains for this route in the timetable. Every train is watched, and the bot
@@ -573,23 +578,29 @@
         return;
       }
       const all = !d.trains.length;
+      const LIMIT = 6;
+      const shown = showAll ? rows : rows.filter((t, i) => i < LIMIT || d.trains.includes(t.n));
       list.innerHTML = `<button class="train-row all ${all ? "on" : ""}" data-t="*"><span class="tick">✓</span>
           <span class="t-main"><b>All trains</b><small>Watch every train on the route (recommended)</small></span></button>` +
-        rows.map((t) => {
+        shown.map((t) => {
           const runs = d.dates.map((x) => runsOn(t, x));
           const no = d.dates.length && runs.every((x) => x === false);
           const some = d.dates.length && !no && runs.some((x) => x === false);
           const note = no ? `<em class="warn">doesn't run on your ${d.dates.length === 1 ? "date" : "dates"}</em>`
             : some ? `<em>runs on ${runs.filter((x) => x !== false).length} of ${d.dates.length} dates</em>`
             : runText(t.r, t.w) ? `<em>${esc(runText(t.r, t.w))}</em>` : "";
-          const cls = t.c.map((c) => `<i>${esc(shortClass(c))}</i>`).join("");
+          const cls = t.c.map((c) => `<i>${esc(tag(c))}</i>`).join("");
           return `<button class="train-row ${d.trains.includes(t.n) ? "on" : ""} ${no ? "dim" : ""}" data-t="${esc(t.n)}">
             <span class="tick">✓</span>
             <span class="t-main"><b>${esc(t.n)}</b><small>${esc(t.b)}</small></span>
             <span class="t-time">${esc(t.dep || "")}${t.dep ? " → " : ""}${esc(t.arr || "")}${t.nights ? `<sup>+${t.nights}</sup>` : ""}</span>
             <span class="t-cls">${cls}${note}</span>
           </button>`;
-        }).join("");
+        }).join("") +
+        (rows.length > LIMIT ? `<button class="more-trains" data-more type="button">${showAll ? "Show fewer"
+          : `Show all ${rows.length} trains`}</button>` : "");
+      const more = list.querySelector("[data-more]");
+      if (more) more.onclick = () => { showAll = !showAll; drawTrains(); };
       $("#trainHint").textContent = all
         ? "From the railway timetable. Live seats are checked after you save."
         : `Watching only ${d.trains.join(", ")}. Tap All trains to watch every train again.`;

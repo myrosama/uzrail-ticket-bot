@@ -179,7 +179,7 @@
   let holdsSig = "";
   function renderHolds() {
     const el = $("#holds");
-    const sig = JSON.stringify([S.holds.map((h) => [h.order, h.seats, h.pay_url]), Object.keys(S.pax || {})]);
+    const sig = JSON.stringify([S.holds.map((h) => [h.order, h.seats, h.pay_url]), S.targets || {}]);
     if (sig !== holdsSig) {          // rebuild only when the holds change, so buttons stay clickable
       holdsSig = sig;
       const berth = { "В": "upper", "Н": "lower" };
@@ -207,8 +207,9 @@
           <div class="xfer-row">
             <label>Seat of<select name="from">${(h.passengers || []).map((p, i) =>
               `<option value="${esc(p)}">${esc((h.names || [])[i] || "Passenger")} (seat ${esc((h.seats || [])[i] || "?")})</option>`).join("")}</select></label>
-            <label>goes to<select name="to">${Object.entries(S.pax || {}).filter(([id]) => !(h.passengers || []).includes(id))
-              .map(([id, n]) => `<option value="${esc(id)}">${esc(n)}</option>`).join("") || '<option value="">no other saved passengers</option>'}</select></label>
+            <label>goes to<select name="to">${((S.targets || {})[h.order] || [])
+              .map((p) => `<option value="${esc(p.id)}">${esc(p.name)} · ${p.pos ? `#${p.pos} in this trip` : "not in this trip"}</option>`).join("")
+              || '<option value="">nobody else can take it (everyone has a seat or a ticket)</option>'}</select></label>
           </div>
           <p class="muted small">The reservation is cancelled and the same seat is re-booked for the new passenger at
             once. That almost always works (others see a freed seat only 2-9 s later). The new passenger also becomes #1

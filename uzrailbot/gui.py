@@ -129,6 +129,7 @@ class App:
             "board": s.get("board", []), "stats": s.get("stats", {}), "offlineSince": s.get("offline_since") or 0,
             "pax": {p["id"]: p["name"] for p in self.engine.passenger_list()} if self.engine else {},
             "done": self.store.state.get("done", {}),
+            "targets": {h["order"]: self.engine.transfer_targets(h["order"]) for h in holds} if self.engine else {},
             "today": time.strftime("%Y-%m-%d", time.gmtime(now + 5 * 3600)),     # Tashkent date
         }
 

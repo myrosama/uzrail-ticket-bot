@@ -782,6 +782,24 @@ class Engine:
             rec.ev("hold_end", order=oid, why=why)
         return h
 
+    def transfer_targets(self, oid) -> list:
+        """Who can get a held seat: any saved passenger who isn't on this hold, doesn't hold another seat and
+        has no ticket for this trip yet. Trip members first (by priority), then everyone else."""
+        h = self.store.state["holds"].get(oid)
+        if not h:
+            return []
+        trip = self.store.trip(h["trip"]) or {"passengers": [], "id": h["trip"]}
+        busy = set(h["passengers"]) | set(self.store.done_passengers(trip["id"]))
+        for other in self.store.state["holds"].values():
+            busy.update(other.get("passengers") or [])
+        out = []
+        for p in self.passenger_list():
+            if p["id"] in busy:
+                continue
+            pos = trip["passengers"].index(p["id"]) + 1 if p["id"] in trip["passengers"] else None
+            out.append({"id": p["id"], "name": p["name"], "pos": pos})
+        return sorted(out, key=lambda p: (p["pos"] is None, p["pos"] or 0, p["name"]))
+
     def transfer_hold(self, oid, from_pid: str, to_pid: str):
         """Give a held seat to another saved passenger: cancel the hold and at once re-book the very same
         seat(s) with `to_pid` in place of `from_pid` (everyone else sees a freed seat only after the railway's
@@ -795,6 +813,8 @@ class Engine:
             return False, "That passenger isn't on this reservation."
         if to_pid in h["passengers"]:
             return False, "That passenger is already on this reservation."
+        if to_pid not in {p["id"] for p in self.transfer_targets(oid)}:
+            return False, "That passenger already holds a seat or has a ticket for this trip."
         if not self.friends:
             self.refresh_friends()
         if to_pid not in self.friends:

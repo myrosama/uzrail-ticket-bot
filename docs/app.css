@@ -306,3 +306,5 @@ details.more[open] summary { margin-bottom: 12px; }
 
 .row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .link-btn { border: 0; background: none; color: var(--green-dark); font-weight: 600; font-size: 13px; padding: 4px 0; }
+.more-trains { border: 1px dashed var(--line-strong); background: transparent; color: var(--green-dark); font-weight: 600;
+  border-radius: var(--radius-sm); padding: 10px; font-size: 14px; }
