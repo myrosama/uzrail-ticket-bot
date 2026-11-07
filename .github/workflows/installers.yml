@@ -50,19 +50,21 @@ jobs:
 
       - name: Start the app (window hidden) and talk to it
         run: |
+          set +e
           if [ "$(uname -s)" = Darwin ]; then H="$HOME/Library/Application Support/UzRailBot"; else H="$HOME/.local/share/UzRailBot"; fi
           ~/.local/bin/uzrailbot --background > app.log 2>&1 &
+          PID=$!
           for i in $(seq 1 90); do [ -f "$H/data/app.key" ] && break; sleep 1; done
           KEY=$(cat "$H/data/app.key")
-          curl -sf -X POST -H "X-App-Key: $KEY" http://127.0.0.1:47613/api/state \
-            | python3 -c "import sys, json; s = json.load(sys.stdin); print('app answers: state', s['state'], 'version', s['version'], 'update', s['update']['state'])"
+          curl -sf -X POST -H "X-App-Key: $KEY" http://127.0.0.1:47613/api/state             | python3 -c "import sys, json; s = json.load(sys.stdin); print('app answers: state', s['state'], 'version', s['version'], 'update', s['update']['state'])"
           sleep 8
-          pgrep -f "uzrailbot --background" >/dev/null && echo "app still running after 8 s"
+          if kill -0 "$PID" 2>/dev/null; then ALIVE=1; echo "app still running after 8 s"; else ALIVE=0; echo "APP EXITED EARLY"; fi
           curl -s -X POST -H "X-App-Key: $KEY" http://127.0.0.1:47613/api/quit; echo
           sleep 4
-          if pgrep -f "uzrailbot --background" >/dev/null; then echo "app did not quit"; exit 1; fi
-          echo "--- app output"; tail -20 app.log || true
-          echo "--- app log"; tail -20 "$H/logs/uzrailbot.log" || true
+          if kill -0 "$PID" 2>/dev/null; then QUIT=0; echo "app did not quit"; else QUIT=1; echo "app quit"; fi
+          echo "--- app output"; tail -40 app.log
+          echo "--- app log"; tail -40 "$H/logs/uzrailbot.log"
+          [ "$ALIVE" = 1 ] && [ "$QUIT" = 1 ]
 
       - name: Uninstall
         run: |
