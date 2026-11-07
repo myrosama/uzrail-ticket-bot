@@ -26,6 +26,13 @@ jobs:
       - name: Install from this checkout (desktop mode, not started)
         run: bash install.sh --desktop --no-start --source="$GITHUB_WORKSPACE"
 
+      - name: A virtual screen (Linux only; a Mac runner has a real one)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y -qq xvfb >/dev/null
+          Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
       - name: Check what was installed
         run: |
           ~/.local/bin/uzrailbot where
@@ -43,12 +50,8 @@ jobs:
 
       - name: Start the app (window hidden) and talk to it
         run: |
-          if [ "$(uname -s)" = Darwin ]; then
-            H="$HOME/Library/Application Support/UzRailBot"; RUN=""
-          else
-            H="$HOME/.local/share/UzRailBot"; sudo apt-get install -y -qq xvfb >/dev/null; RUN="xvfb-run -a"
-          fi
-          $RUN ~/.local/bin/uzrailbot --background > app.log 2>&1 &
+          if [ "$(uname -s)" = Darwin ]; then H="$HOME/Library/Application Support/UzRailBot"; else H="$HOME/.local/share/UzRailBot"; fi
+          ~/.local/bin/uzrailbot --background > app.log 2>&1 &
           for i in $(seq 1 90); do [ -f "$H/data/app.key" ] && break; sleep 1; done
           KEY=$(cat "$H/data/app.key")
           curl -sf -X POST -H "X-App-Key: $KEY" http://127.0.0.1:47613/api/state \

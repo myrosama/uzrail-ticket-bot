@@ -352,7 +352,8 @@ class App:
     def start_tray(self):
         try:
             import pystray
-        except ImportError:
+        except Exception:              # not installed, or no display at all (Linux: Xlib DisplayNameError)
+            log.warning("no tray icon on this system")
             return
 
         def toggle_pause(_icon, _item):
@@ -425,7 +426,7 @@ class App:
         self.start_tray()
         try:
             import webview
-        except ImportError:
+        except Exception:              # not installed or no window system: use the browser instead
             webview = None
         if webview is None:
             self._browser_fallback()
