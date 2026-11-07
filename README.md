@@ -33,16 +33,17 @@ Then it sends you a **Pay** button in Telegram.
 
 ## Highlights
 
-|  |  |
-| --- | --- |
-| ⚡ **Fast** | Usually about 2 s from a seat appearing to it being held in your name (measured on real sold-out trains). |
-| 🚆 **Every route and class** | Plaskart, kupe, SV, lux and sitting. Pick a route and you see its trains, times and classes. |
-| 👥 **Up to 4 passengers** | In priority order: if fewer seats appear, the first passengers get them. |
-| 💳 **You pay, it books** | Pay on Hamkorbank's own page; the ticket PDF arrives in the chat. |
-| 🔄 **Transfer** | Give a held seat to another of your saved passengers in a couple of seconds. |
-| 📊 **See everything** | Telegram status per passenger, a live board of free seats, an activity feed and a live console. |
-| 🔒 **Private** | Runs on your computer. Your railway password is encrypted on your phone before it leaves it. |
-| ⬆️ **Updates itself** | New versions install in the background, never in the middle of a booking. |
+- ⚡ **Fast**: usually about 2 s from a seat appearing to it being held in your name (measured on real
+  sold-out trains).
+- 🚆 **Every route and class**: plaskart, kupe, SV, lux and sitting. Pick a route and you see its trains, times
+  and classes.
+- 👥 **Up to 4 passengers** in priority order: if fewer seats appear, the first passengers get them.
+- 💳 **You pay, it books**: pay on Hamkorbank's own page; the ticket PDF arrives in the chat.
+- 🔄 **Transfer**: give a held seat to another of your saved passengers in a couple of seconds.
+- 📊 **See everything**: per-passenger status in Telegram, a live board of free seats, an activity feed and a
+  live console.
+- 🔒 **Private**: runs on your computer. Your railway password is encrypted on your phone before it leaves it.
+- ⬆️ **Updates itself**: new versions install in the background, never in the middle of a booking.
 
 ## Install
 
@@ -125,10 +126,8 @@ It also shows what the railway has right now on your dates.
 
 ```mermaid
 flowchart LR
-    R[("eticket.uzrailpass.uz")] -- "train list, about every 0.8 s" --> B["UzRail Bot<br/>on your computer"]
-    B -- "seat appeared: reserve it" --> R
-    B -- "seats · held · Pay · ticket PDF" --> T["Your Telegram"]
-    T -- "trips · passengers · transfer" --> B
+    R[("Railway site")] <-->|"check every 0.8 s<br/>reserve new seats"| B["UzRail Bot<br/>(your computer)"]
+    B <-->|"alerts · Pay · PDF<br/>trips · transfer"| T["Your<br/>Telegram"]
 ```
 
 There is no browser automation. The bot talks to the railway's own API, the same one the website uses.
