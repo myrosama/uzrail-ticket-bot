@@ -20,17 +20,25 @@ ticket PDF arrives in the chat.
 irm https://raw.githubusercontent.com/myrosama/uzrail-ticket-bot/main/install.ps1 | iex
 ```
 
-**Linux** (Ubuntu, Debian, Fedora, Arch…):
+**macOS and Linux** (Ubuntu, Debian, Fedora, Arch…): open Terminal and paste:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/myrosama/uzrail-ticket-bot/main/install.sh | bash
 ```
 
-On a server without a screen, add `-s -- --headless`. Setup then runs in the terminal, and the bot runs as a
-systemd user service.
+On a Linux server without a screen, add `-s -- --headless`. Setup then runs in the terminal, and the bot runs
+as a systemd user service.
 
-The installer gets Python if needed, installs the app into a private folder, adds it to the Start menu or app
-menu, and opens it. Run the same line again to update.
+The installer gets Python if needed (on a Mac: Homebrew's, or the system one; if neither is there, it tells you
+where to get it). It installs the app into a private folder and adds it to:
+- the Start menu on Windows;
+- **Applications** on a Mac, as "UzRail Bot", with a menu-bar icon;
+- the app menu on Linux.
+
+Then it opens the app. Run the same line again to update, though the app also updates itself.
+
+Every change to the installers is tested automatically on real Windows, macOS and Ubuntu machines: install,
+start the app, talk to it, quit, uninstall (`.github/workflows/installers.yml`).
 
 ## First run (2 minutes)
 
@@ -46,7 +54,7 @@ menu, and opens it. Run the same line again to update.
      default; tap one or more to watch only those. **Ticket classes** then shows only the classes those
      trains have, each with a train count. Others are kept under "Other classes".
    - after you save, the bot checks your dates live and replies with each train's free seats right now.
-4. Leave the computer on. On Windows the bot stops it from going to sleep while trips are being watched.
+4. Leave the computer on. On Windows and macOS the bot stops it from going to sleep while trips are being watched.
 
 ## What you get in Telegram
 
@@ -88,7 +96,7 @@ the tray.
 | Live console | One click (Status, Activity, or the tray menu) opens a console window with everything as it happens: every check (one line each), requests, the railway's live order events, and every booking step. |
 | Settings | Start with the computer, automatic updates, Telegram link, data folder, Quit |
 
-Command line (`uzrailbot` on Linux; on Windows `%LOCALAPPDATA%\UzRailBot\venv\Scripts\python -m uzrailbot`):
+Command line (`uzrailbot` on macOS and Linux; on Windows `%LOCALAPPDATA%\UzRailBot\venv\Scripts\python -m uzrailbot`):
 
 | Command | |
 | --- | --- |
@@ -132,10 +140,11 @@ versions, and you install them with **Update now**. Running the install line aga
 
 ## Privacy
 
-Everything stays on your computer: `%LOCALAPPDATA%\UzRailBot` on Windows, `~/.local/share/UzRailBot` on Linux.
+Everything stays on your computer: `%LOCALAPPDATA%\UzRailBot` on Windows, `~/Library/Application Support/UzRailBot`
+on macOS, `~/.local/share/UzRailBot` on Linux.
 
 - The railway password and bot token are encrypted at rest. On Windows this uses DPAPI, tied to your Windows
-  account. On Linux it uses a key file only you can read.
+  account. On macOS and Linux it uses a key file only you can read.
 - The Telegram mini app is a static page (`docs/` on GitHub Pages) with no server behind it. It encrypts your
   railway password on your phone with your PC's public key, so Telegram only ever carries ciphertext.
 - The status window talks to the bot over `127.0.0.1` with a random per-run key.
@@ -146,7 +155,7 @@ Everything stays on your computer: `%LOCALAPPDATA%\UzRailBot` on Windows, `~/.lo
 Windows (PowerShell):
 `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/myrosama/uzrail-ticket-bot/main/install.ps1))) -Uninstall`
 
-Linux: `curl -fsSL https://raw.githubusercontent.com/myrosama/uzrail-ticket-bot/main/install.sh | bash -s -- --uninstall`
+macOS / Linux: `curl -fsSL https://raw.githubusercontent.com/myrosama/uzrail-ticket-bot/main/install.sh | bash -s -- --uninstall`
 
 Your settings folder is kept; delete it to remove everything.
 
