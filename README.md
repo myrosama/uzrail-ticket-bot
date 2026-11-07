@@ -41,6 +41,8 @@ menu, and opens it. Run the same line again to update.
    - connect your eticket.uzrailpass.uz login;
    - add a trip: from/to, one or more dates, accepted classes, max price, passengers in priority order (up to
      4, from the saved passengers on your railway account), and **Notify** or **Auto-buy**.
+   - after you save, the bot lists the trains running on your dates with their departure and arrival times.
+     Every train is watched by default; tap one or more to watch only those.
 4. Leave the computer on. On Windows the bot stops it from going to sleep while trips are being watched.
 
 ## What you get in Telegram
@@ -51,6 +53,13 @@ menu, and opens it. Run the same line again to update.
 3. **💳 Pay** button with a countdown. The railway holds seats for about 12 minutes. If you haven't paid by
    then, the bot re-reserves up to 3 times. After payment it sends the **ticket PDF**.
 
+**📊 Status** shows what the railway has right now:
+- every train on your dates, with departure → arrival and free seats per class;
+- whether a class is over your maximum price;
+- any seats held for you and the time left to pay.
+
+If this PC loses its internet for more than 2 minutes, the bot tells you, and tells you again when it's back.
+
 ## The desktop app
 
 A small window plus a tray icon: **green** means watching, **amber** means seats are held and waiting for
@@ -59,10 +68,11 @@ the tray.
 
 | Page | |
 | --- | --- |
-| Status | What it's doing, last check, checks per minute, response time; held seats with Pay / Cancel |
-| Trips | Your trips, pause/resume each |
-| Activity | Every detection and booking step, in plain words |
-| Settings | Start with the computer, Telegram link, data folder, Quit |
+| Status | What the bot is doing, last check, checks per minute, the railway's response time and holds this session. Held seats show passengers, berths, the countdown and Pay / Cancel. **Right now on the railway site** is the live board: each train's times and free seats per class, colour-coded (matches your trip / over your max price / sold out / not chosen). A red banner appears when the internet drops. |
+| Trips | Each trip's status (watching, paused, seats held, everyone has a ticket, dates passed), its dates, classes, price limit and train filter, and passengers in priority order with who already has a seat. Pause, resume or delete. |
+| Activity | Every detection and booking step in plain words, with **Seats & bookings** and **Problems** filters. Repeats are folded into ×N. |
+| Live console | One click (Status, Activity, or the tray menu) opens a console window with everything as it happens: every check (one line each), requests, the railway's live order events, and every booking step. |
+| Settings | Start with the computer, automatic updates, Telegram link, data folder, Quit |
 
 Command line (`uzrailbot` on Linux; on Windows `%LOCALAPPDATA%\UzRailBot\venv\Scripts\python -m uzrailbot`):
 
@@ -72,7 +82,7 @@ Command line (`uzrailbot` on Linux; on Windows `%LOCALAPPDATA%\UzRailBot\venv\Sc
 | `uzrailbot run` | No window: console mode for servers |
 | `uzrailbot setup` | Link a different Telegram bot (in the terminal) |
 | `uzrailbot report [N]` | Timeline of the latest session: every check, detection and booking step with timings |
-| `uzrailbot live` | Live console view of what the bot is doing |
+| `uzrailbot live` | Live console: the last 60 lines, then everything as it happens (`--all` replays the whole session) |
 | `uzrailbot autostart on\|off` | Start with the computer |
 | `uzrailbot where` | Where settings and logs are kept |
 

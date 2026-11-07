@@ -36,9 +36,32 @@ def today_tashkent() -> str:
     return dt.datetime.now(TZ_TASHKENT).date().isoformat()
 
 
+def hhmm(stamp) -> str:
+    """'07.11.2026 21:05' -> '21:05'."""
+    return str(stamp or "")[-5:]
+
+
+def board_row(tr) -> dict:
+    """One train of a check, for the live board: free seats and lowest price per class."""
+    classes = {}
+    for car in tr.get("cars") or []:
+        tfs = car.get("tariffs") or []
+        for tf in tfs:
+            c = tf.get("classServiceType")
+            free = int(car.get("freeSeats") or 0) if len(tfs) == 1 else int(tf.get("freeSeats") or 0)
+            price = int(tf.get("tariff") or 0)
+            if c in classes:
+                classes[c]["free"] += free
+                classes[c]["price"] = min(classes[c]["price"], price) if classes[c]["price"] else price
+            else:
+                classes[c] = {"free": free, "price": price}
+    return {"number": tr.get("number"), "dep": tr.get("departureDate"), "arr": tr.get("arrivalDate"),
+            "brand": tr.get("brand"), "classes": classes}
+
+
 def match_train(trip: dict, train: dict) -> list:
     """Classes on this train that match the trip: [{cls, price, free, carType}]."""
-    if trip.get("train") and not str(train.get("number", "")).startswith(trip["train"]):
+    if trip.get("trains") and str(train.get("number", "")) not in trip["trains"]:
         return []
     out = []
     for car in train.get("cars") or []:
@@ -94,6 +117,12 @@ class Engine:
         self.ours = set()              # orders we cancel/replace ourselves (ignore their ORDER_FAILED)
         self.status = {"state": "starting", "detail": "", "last_check": 0.0, "checks": 0,
                        "account": "", "live": False}
+        self.board = {}                # (from, to, date) -> what the last check saw: trains, classes, free, price
+        self.recent_held = {}          # (date, train, cls) -> [(time, seats)] we just took (the list lags)
+        self.fail_streak = 0
+        self.offline_since = 0.0
+        self.offline_alerted = False
+        self.stats = {"since": time.time(), "detections": 0, "holds": 0, "missed": 0, "fastest": None}
         self._alerted = {}
 
     # ---------------------------------------------------------------- lifecycle
@@ -135,7 +164,7 @@ class Engine:
     def _ensure_client(self) -> bool:
         email, password = self.store.railway_login()
         if not email or not password:
-            self._set("setup", "railway account not set - send /account to the bot")
+            self._set("setup", "connect your railway account in Telegram: 🚆 Trips & settings → Account")
             return False
         if self.client is None or self.client.email != email:
             self.client = eticket.Client(email, password)
@@ -229,7 +258,7 @@ class Engine:
                     continue
                 trips = [t for t in self.store.trips() if t["active"]]
                 if not trips:
-                    self._set("idle", "no active trips - send /new to the bot")
+                    self._set("idle", "no active trips: add one in Telegram (🚆 Trips & settings)")
                     time.sleep(1)
                     continue
                 if not self._ensure_client():
@@ -275,6 +304,11 @@ class Engine:
             trains = self.client.trains(date, frm, to)
             self.status["last_check"] = time.time()
             self.status["checks"] += 1
+            self.fail_streak = 0
+            if self.offline_alerted:
+                self.offline_alerted = False
+                self.ui.info("Connection to the railway site is back. Watching again.")
+            self.offline_since = 0.0
             if self.status["state"] != "watching":
                 self._set("watching", "")
         except Maintenance as e:
@@ -290,6 +324,14 @@ class Engine:
             self.backoff[key] = time.monotonic() + 2
             self.status["detail"] = f"check failed: {type(e).__name__}"
             rec.ev("check_fail", key=list(key), error=f"{type(e).__name__}: {e}"[:200])
+            self.fail_streak += 1
+            if self.fail_streak >= 3:
+                self.offline_since = self.offline_since or time.time()
+                self._set("offline", "no answer from the railway site: check the internet connection")
+                if not self.offline_alerted and time.time() - self.offline_since > 120:
+                    self.offline_alerted = True
+                    self.ui.problem("No answer from the railway site for 2 minutes. Is this PC's internet "
+                                    "working? I keep trying and tell you when it's back.")
             return
         finally:
             self.inflight.discard(key)
@@ -299,7 +341,8 @@ class Engine:
             seen[tr["number"]] = {tf.get("classServiceType"): (int(car.get("freeSeats") or 0) if len(car.get("tariffs") or []) == 1
                                                                  else int(tf.get("freeSeats") or 0))
                                   for car in tr.get("cars") or [] for tf in car.get("tariffs") or []}
-        rec.ev("check", date=date, ms=ms, n=self.status["checks"], trains=seen)
+        rec.ev("check", date=date, route=[frm, to], ms=ms, n=self.status["checks"], trains=seen)
+        self.board[key] = {"at": time.time(), "ms": ms, "trains": [board_row(tr) for tr in trains]}
         for trip in trips:
             hits = []
             for tr in trains:
@@ -328,11 +371,13 @@ class Engine:
                 if (fresh or (first and hits)) and time.time() - self.last_notice.get((trip["id"], date), 0) > 20:
                     self.last_notice[(trip["id"], date)] = time.time()
                     self.ui.seats_found(trip, date, hits)
-            elif hits:
+            elif any(self._effective_free(date, h) > 0 for h in hits):
+                hits = [dict(h, free=self._effective_free(date, h)) for h in hits if self._effective_free(date, h) > 0]
                 with self.lock:
                     if trip["id"] in self.booking:
                         continue
                     self.booking.add(trip["id"])
+                self.stats["detections"] += 1
                 rec.ev("detect", trip=trip["id"], date=date, fresh=bool(fresh), check_ms=ms,
                        hits=[{"train": h["number"], "cls": h["cls"], "free": h["free"], "price": h["price"]} for h in hits])
                 if not self._submit(self._book, trip["id"], date, hits, bool(fresh)):
@@ -342,8 +387,17 @@ class Engine:
                     # message 1 of 3: "tickets appeared" (sent after booking already started: no delay)
                     self.last_notice[(trip["id"], date)] = time.time()
                     self.ui.seats_found(trip, date, hits)
-            else:
+            elif not hits:
                 self._maybe_learn(trip, date, trains)
+
+    def _effective_free(self, date, hit) -> int:
+        """Free seats minus the ones we took in the last 30 s. The railway's train list keeps counting a seat
+        we just held as free for 2-9 s; booking it again only fails (and used to send a 'missed')."""
+        now = time.time()
+        k = (date, hit["number"], hit["cls"])
+        taken = [(t, n) for t, n in self.recent_held.get(k, []) if now - t < 30]
+        self.recent_held[k] = taken
+        return hit["free"] - sum(n for _, n in taken)
 
     # ---------------------------------------------------------------- car numbers, learned ahead of time
     def _cars_cache(self, number: str, cls: str, date: str = "") -> dict:
@@ -487,6 +541,7 @@ class Engine:
                 if not party:
                     return held
         if not held:
+            self.stats["missed"] += 1
             rec.ev("missed", trip=trip["id"], train=number, cls=cls, why="seats taken before our hold settled")
             if time.time() - self.last_notice.get(("missed", trip["id"]), 0) > 60:
                 self.last_notice[("missed", trip["id"])] = time.time()
@@ -617,6 +672,10 @@ class Engine:
                 str(car["number"])] = {"carType": car.get("carType"), "service": car.get("service") or hit["cls"]}
             self.store.save()
         self._remember_pending(oid, add=False)
+        self.recent_held.setdefault((date, hit["number"], hit["cls"]), []).append((time.time(), len(who)))
+        self.stats["holds"] += 1
+        if self.stats["fastest"] is None or took < self.stats["fastest"]:
+            self.stats["fastest"] = round(took, 2)
         rec.ev("held", order=oid, train=hold["train"], car=hold["car"], seats=hold["seats"], took_s=hold["took"],
                path=path, passengers=len(who), total=hold["total"], left_s=left, pay_link=bool(hold["pay_url"]))
         log.info("HELD %s train %s car %s seats %s (%.2f s, %s)", oid, hold["train"], hold["car"], hold["seats"],
@@ -773,5 +832,36 @@ class Engine:
         for h in self.store.state["holds"].values():
             holds.append({k: h.get(k) for k in ("order", "train", "car", "seats", "names", "total", "from", "to",
                                                 "date", "renewals")} | {"left": max(0, int(h["expires_at"] - time.time()))})
-        return dict(self.status, holds=holds, trips=self.store.trips(),
-                    calls=self.client.calls if self.client else 0)
+        active = {(t["from"]["code"], t["to"]["code"], d) for t in self.store.trips() if t["active"] for d in t["dates"]}
+        board = [{"from": k[0], "to": k[1], "date": k[2], **v} for k, v in list(self.board.items()) if k in active]
+        return dict(self.status, holds=holds, trips=self.store.trips(), board=board, stats=dict(self.stats),
+                    offline_since=self.offline_since, calls=self.client.calls if self.client else 0)
+
+    # ---------------------------------------------------------------- train list for the "which trains" picker
+    def scan_trains(self, trip, fetch: bool = True) -> list:
+        """Trains running on the trip's dates (from the latest checks, or asked now if fetch): one row per
+        train number with departure/arrival times and the dates it was seen on."""
+        if fetch and not self._ensure_client():
+            return []
+        out = {}
+        today = today_tashkent()
+        for d in [d for d in sorted(trip["dates"]) if d >= today][:6]:
+            key = (trip["from"]["code"], trip["to"]["code"], d)
+            b = self.board.get(key)
+            if not b or (fetch and time.time() - b["at"] > 120):
+                if not fetch:
+                    continue
+                try:
+                    trains = self.client.trains(d, *key[:2])
+                except EticketError:
+                    continue
+                b = {"at": time.time(), "ms": 0, "trains": [board_row(tr) for tr in trains]}
+                self.board[key] = b
+            for tr in b["trains"]:
+                row = out.setdefault(tr["number"], {"number": tr["number"], "dep": hhmm(tr["dep"]),
+                                                    "arr": hhmm(tr["arr"]), "dates": [], "classes": {}})
+                row["dates"].append(d)
+                for c, v in tr["classes"].items():
+                    if not trip["classes"] or c in trip["classes"]:
+                        row["classes"][c] = row["classes"].get(c, 0) + v["free"]
+        return sorted(out.values(), key=lambda r: r["dep"])

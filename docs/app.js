@@ -177,6 +177,7 @@
             <span class="tag ${t.mode === "buy" ? "green" : ""}">${t.mode === "buy" ? "Auto-buy" : "Notify only"}</span>
             ${(t.classes.length ? t.classes : ["any"]).map((c) => `<span class="tag">${c === "any" ? "Any class" : esc(shortClass(c))}</span>`).join("")}
             ${t.maxPrice ? `<span class="tag">≤ ${fmtSum(t.maxPrice)} so'm</span>` : ""}
+            ${t.trains && t.trains.length ? `<span class="tag">Only ${esc(t.trains.join(", "))}</span>` : ""}
             ${t.active ? "" : `<span class="tag amber">Paused</span>`}
           </div>
           ${t.mode === "buy" ? `<div class="trip-people">${t.passengers.map((p, i) => `${i + 1}. ${esc(paxName(p))}`).join(" · ")}</div>` : ""}
@@ -203,8 +204,9 @@
     const src = id ? S.trips.find((t) => t.id === id) : null;
     const d = src ? JSON.parse(JSON.stringify(src)) : {
       from: null, to: null, dates: [], classes: [], maxPrice: 0, mode: "buy",
-      passengers: [], speed: 1, train: "", together: false, active: true,
+      passengers: [], speed: 1, trains: [], together: false, active: true,
     };
+    d.trains = d.trains || [];
     d.dates = (d.dates || []).filter((x) => x >= iso(today()));
     let month = d.dates.length ? new Date(d.dates[0] + "T00:00:00") : today();
     month = new Date(month.getFullYear(), month.getMonth(), 1);
@@ -236,6 +238,12 @@
       </section>
 
       <section class="card form-section">
+        <h3>Trains</h3>
+        <div class="chips" id="trainChips"></div>
+        <p class="hint" id="trainHint"></p>
+      </section>
+
+      <section class="card form-section">
         <h3>Ticket classes</h3>
         <div class="chips" id="classes"></div>
         <p class="hint" id="classHint"></p>
@@ -260,7 +268,7 @@
         <p class="hint">Tap to choose (up to ${MAX_PAX}). The order is the priority: if fewer seats appear, the first ones get them.</p>
         <div class="divider"></div>
         <label class="switch-row">
-          <span class="txt">Only if everyone fits in one car<small>Otherwise the first passengers are booked as seats appear</small></span>
+          <span class="txt">Keep everyone together<small>On: book only when all passengers fit in one car. Off: book whoever fits first, so people may end up in different cars, classes or trains.</small></span>
           <span class="switch"><input type="checkbox" id="together"><span></span></span>
         </label>
       </section>
@@ -271,10 +279,6 @@
           <div class="field">
             <label>Check speed</label>
             <div class="seg" id="speed"></div>
-          </div>
-          <div class="field">
-            <label for="train">Only this train number (optional)</label>
-            <input class="input" id="train" placeholder="e.g. 056Ч" maxlength="8">
           </div>
         </details>
       </section>`;
@@ -303,13 +307,14 @@
             haptic();
             stationBox(key, label);
             validate();
+            if (typeof drawTrains === "function") drawTrains();
           };
         });
       });
     }
     stationBox("from", "From");
     stationBox("to", "To");
-    $("#swap").onclick = () => { [d.from, d.to] = [d.to, d.from]; stationBox("from", "From"); stationBox("to", "To"); haptic(); validate(); };
+    $("#swap").onclick = () => { [d.from, d.to] = [d.to, d.from]; stationBox("from", "From"); stationBox("to", "To"); haptic(); validate(); drawTrains(); };
 
     // calendar
     const DOW = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
@@ -420,12 +425,36 @@
     $("#speed").innerHTML = SPEEDS.map((s) => `<button data-v="${s.v}">${s.label}<br><span class="muted">${s.sub}</span></button>`).join("");
     function drawSpeed() {
       $("#speed").querySelectorAll("button").forEach((b) => { b.classList.toggle("on", +b.dataset.v === d.speed); b.style.height = "52px"; b.style.lineHeight = "1.2"; });
-      $("#moreSum").textContent = `${SPEEDS.find((s) => s.v === d.speed).label} speed${d.train ? ", train " + d.train : ""}`;
+      $("#moreSum").textContent = `${SPEEDS.find((s) => s.v === d.speed).label} speed`;
     }
     $("#speed").querySelectorAll("button").forEach((b) => { b.onclick = () => { d.speed = +b.dataset.v; haptic(); drawSpeed(); }; });
-    $("#train").value = d.train || "";
-    $("#train").oninput = (e) => { d.train = e.target.value.trim().toUpperCase(); drawSpeed(); };
     drawSpeed();
+
+    // trains: every train by default; pick some to watch only those (times come from the PC's last scan)
+    function drawTrains() {
+      const sameRoute = src && d.from && d.to && src.from.code === d.from.code && src.to.code === d.to.code;
+      const known = sameRoute ? (src.kt || []) : [];
+      if (!sameRoute && d.trains.length && src) d.trains = [];
+      const chips = [`<button class="chip ${d.trains.length ? "" : "on"}" data-t="*"><span class="check">✓</span>All trains</button>`]
+        .concat(known.map(([n, dep, arr]) => `<button class="chip ${d.trains.includes(n) ? "on" : ""}" data-t="${esc(n)}">
+          <span class="check">✓</span>${esc(n)}<span class="muted">${esc(dep)} → ${esc(arr)}</span></button>`))
+        .concat(d.trains.filter((n) => !known.some(([k]) => k === n)).map((n) =>
+          `<button class="chip on" data-t="${esc(n)}"><span class="check">✓</span>${esc(n)}</button>`));
+      $("#trainChips").innerHTML = chips.join("");
+      $("#trainHint").textContent = known.length
+        ? (d.trains.length ? `Watching only ${d.trains.join(", ")}. Tap All trains to watch every train again.`
+                           : "Every train on the route is watched. Tap trains to watch only those.")
+        : "Every train on the route is watched. After you save, the bot lists the trains on your dates with their times, so you can pick one.";
+      $("#trainChips").querySelectorAll("[data-t]").forEach((b) => {
+        b.onclick = () => {
+          const n = b.dataset.t;
+          if (n === "*") d.trains = [];
+          else d.trains = d.trains.includes(n) ? d.trains.filter((x) => x !== n) : [...d.trains, n];
+          haptic(); drawTrains();
+        };
+      });
+    }
+    drawTrains();
     drawMode();
 
     function problems() {
@@ -444,7 +473,7 @@
       const trip = {
         id: src ? src.id : undefined, from: d.from, to: d.to, dates: d.dates, classes: d.classes,
         maxPrice: d.maxPrice || 0, mode: d.mode, passengers: d.mode === "buy" ? d.passengers : [],
-        speed: d.speed, train: d.train, together: d.together, active: src ? src.active : true,
+        speed: d.speed, trains: d.trains, together: d.together, active: src ? src.active : true,
       };
       send({ a: "trip", trip });
     }
@@ -501,10 +530,19 @@
   }
 
   // ------------------------------------------------------------------ start
+  function applyTheme() {
+    const dark = inTelegram ? tg.colorScheme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    if (inTelegram) {
+      try { tg.setHeaderColor(dark ? "#182029" : "#ffffff"); tg.setBackgroundColor(dark ? "#0f141b" : "#f3f6fa"); }
+      catch (e) { /* older clients */ }
+    }
+  }
+  applyTheme();
   if (inTelegram) {
     tg.ready();
     tg.expand();
-    try { tg.setHeaderColor("#ffffff"); tg.setBackgroundColor("#f3f6fa"); } catch (e) { /* older clients */ }
+    try { tg.onEvent("themeChanged", applyTheme); } catch (e) { /* older clients */ }
   }
   render(location.hash.includes("v=account") ? "account" : location.hash.includes("v=new") ? "trip" : "home");
 })();

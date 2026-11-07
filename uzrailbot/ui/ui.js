@@ -10,9 +10,21 @@
     "3П": "Plaskart", "2К": "Kupe", "1Л": "SV / Lux", "2Е": "Sitting economy",
     "1С": "Sitting business", "2В": "Sitting 2nd class", "1В": "Sitting 1st class",
   };
+  const SHORT = { "3П": "Plaskart", "2К": "Kupe", "1Л": "SV", "2Е": "Sitting eco", "1С": "Sitting biz", "2В": "Sitting 2nd", "1В": "Sitting 1st" };
   const cls = (c) => CLASSES[c] || c;
+  const short = (c) => SHORT[c] || c;
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const fmtDate = (d) => { const [y, m, day] = String(d).split("-"); return y && m ? `${+day} ${MONTHS[+m - 1]}` : d; };
+  const fmtDay = (d) => { const [y, m, day] = String(d).split("-").map(Number); if (!y) return d;
+    const w = new Date(Date.UTC(y, m - 1, day)).getUTCDay(); return `${DAYS[w]} ${day} ${MONTHS[m - 1]}`; };
+  const hhmm = (stamp) => String(stamp || "").slice(-5);
+  /* "07.11.2026 21:05" + "08.11.2026 07:40" -> "21:05 → 07:40 +1" */
+  const span = (dep, arr) => {
+    const d1 = String(dep || "").slice(0, 10), d2 = String(arr || "").slice(0, 10);
+    return `${hhmm(dep)} → ${hhmm(arr)}${d1 && d2 && d1 !== d2 ? '<sup>+1</sup>' : ""}`;
+  };
+  const ago = (sec) => sec < 1 ? "just now" : sec < 60 ? `${sec.toFixed(sec < 10 ? 1 : 0)} s ago` : `${Math.round(sec / 60)} min ago`;
   const fmtSum = (n) => Math.round(+n || 0).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
   const fmtLeft = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
@@ -49,6 +61,9 @@
     if (o) api("/api/open", { target: "url", url: o.dataset.open });
     const a = e.target.closest("[data-act]");
     if (a) api("/api/open", { target: a.dataset.act });
+    if (e.target.closest("[data-console]")) {
+      api("/api/console").then((r) => toast(r.ok ? "Live console opened in its own window" : r.error));
+    }
   });
 
   /* ---------------------------------------------------------------- status */
@@ -64,6 +79,7 @@
     starting: { tone: "", title: "Starting…" },
     maintenance: { tone: "warn", title: "Railway site is unavailable" },
     error: { tone: "bad", title: "Something is wrong" },
+    offline: { tone: "bad", title: "No connection to the railway site" },
   };
 
   function subline(s) {
@@ -73,8 +89,8 @@
       return `${active.length} trip${active.length === 1 ? "" : "s"} · ${dates.size} date${dates.size === 1 ? "" : "s"} · checking about every second`;
     }
     if (s.state === "paused") return "Nothing is checked until you resume.";
-    if (s.state === "idle") return "Open the Telegram bot and add a trip in 🚆 Trips & settings.";
-    if (s.state === "setup") return s.account ? s.detail : "Connect your railway account in the Telegram bot (🚆 Trips & settings → Account).";
+    if (s.state === "idle") return "Open the Telegram bot and add a trip in Trips & settings.";
+    if (s.state === "setup") return s.account ? s.detail : "Connect your railway account in the Telegram bot (Trips & settings → Account).";
     return s.detail || "";
   }
 
@@ -87,12 +103,77 @@
     $("#headline").textContent = st.title;
     $("#subline").textContent = s.holds.length ? "Pay before the timer runs out, or the railway releases them." : subline(s);
     const age = s.lastCheckAge == null ? null : s.lastCheckAge + (Date.now() - fetchedAt) / 1000;
-    $("#stAge").textContent = age == null ? "–" : age < 60 ? `${age.toFixed(1)} s ago` : `${Math.round(age / 60)} min ago`;
+    $("#stAge").textContent = age == null ? "–" : ago(age);
     $("#stRate").textContent = s.checksPerMin ? s.checksPerMin : "–";
     $("#stMs").textContent = s.medianMs ? `${s.medianMs} ms` : "–";
+    const st2 = s.stats || {};
+    $("#stHolds").textContent = st2.holds != null ? st2.holds : "–";
+    $("#stHoldsSub").textContent = st2.fastest ? `holds · fastest ${st2.fastest} s` : "holds this session";
     const pb = $("#pauseBtn");
     pb.innerHTML = s.paused ? '<svg><use href="#i-play"/></svg><span>Resume</span>' : '<svg><use href="#i-pause"/></svg><span>Pause</span>';
+    // connection problems, said plainly
+    const nb = $("#netBanner");
+    const off = s.state === "offline" ? (s.offlineSince ? Date.now() / 1000 - s.offlineSince : 0) : null;
+    if (off != null) {
+      nb.hidden = false;
+      nb.innerHTML = `<span class="spinner"></span><span><b>No answer from the railway site${off > 5 ? ` for ${ago(off).replace(" ago", "")}` : ""}.</b>
+        Check this computer's internet. The bot keeps trying and carries on by itself.</span>`;
+    } else if (s.state === "watching" && age != null && age > 20) {
+      nb.hidden = false;
+      nb.innerHTML = `<span class="spinner"></span><span>Checks are slow: the last answer came ${ago(age)}.</span>`;
+    } else nb.hidden = true;
     renderHolds();
+    renderBoard();
+  }
+
+  /* ---------------------------------------------------------------- live board */
+  function classChip(c, v, trip) {
+    const wanted = !trip.classes.length || trip.classes.includes(c);
+    const over = trip.maxPrice && v.price > trip.maxPrice;
+    let k = "c";
+    if (!wanted) k += " other";
+    else if (v.free > 0 && over) k += " over";
+    else if (v.free > 0) k += " ok";
+    else k += " zero";
+    const price = v.free > 0 && v.price ? ` · ${fmtSum(v.price)}` : "";
+    const title = wanted ? (over && v.free ? "Above your maximum price" : "") : "Not a class you chose";
+    return `<span class="${k}" title="${title}">${esc(short(c))} <b>${v.free}</b>${price}</span>`;
+  }
+  function renderBoard() {
+    const el = $("#board");
+    const active = S.trips.filter((t) => t.active);
+    $("#boardHead").hidden = !active.length || S.paused;
+    if (!active.length || S.paused) { el.innerHTML = ""; return; }
+    const now = Date.now() / 1000;
+    const cards = [];
+    for (const t of active) {
+      for (const d of [...t.dates].sort().filter((x) => x >= S.today)) {
+        const b = S.board.find((x) => x.from === t.from.code && x.to === t.to.code && x.date === d);
+        let body;
+        if (!b) body = '<p class="empty slim">Waiting for the first check…</p>';
+        else if (!b.trains.length) body = '<p class="empty slim">No trains on this date.</p>';
+        else {
+          body = '<div class="trains">' + [...b.trains].sort((x, y) => hhmm(x.dep).localeCompare(hhmm(y.dep))).map((tr) => {
+            const watched = !(t.trains && t.trains.length) || t.trains.includes(tr.number);
+            const entries = Object.entries(tr.classes).sort(([a], [z]) =>
+              (t.classes.includes(z) ? 1 : 0) - (t.classes.includes(a) ? 1 : 0));
+            return `<div class="tr ${watched ? "" : "dim"}">
+              <span class="num">${esc(tr.number)}</span>
+              <span class="time">${span(tr.dep, tr.arr)}</span>
+              <span class="cells">${entries.map(([c, v]) => classChip(c, v, t)).join("") || '<span class="c zero">sold out</span>'}
+                ${watched ? "" : '<span class="muted small">not watched</span>'}</span>
+            </div>`;
+          }).join("") + "</div>";
+        }
+        const when = b ? `checked ${ago(now - b.at)}` : "";
+        cards.push(`<div class="card board">
+          <div class="board-head">
+            <div><b>${esc(t.from.name)} → ${esc(t.to.name)}</b> <span class="muted">· ${esc(fmtDay(d))}</span></div>
+            <span class="muted small">${when}</span>
+          </div>${body}</div>`);
+      }
+    }
+    el.innerHTML = cards.join("") || '<p class="empty">No upcoming dates in your active trips.</p>';
   }
 
   let holdsSig = "";
@@ -101,23 +182,33 @@
     const sig = JSON.stringify(S.holds.map((h) => [h.order, h.seats, h.pay_url, h.renewals]));
     if (sig !== holdsSig) {          // rebuild only when the holds change, so buttons stay clickable
       holdsSig = sig;
-      el.innerHTML = S.holds.map((h) => `<div class="card hold">
+      const berth = { "В": "upper", "Н": "lower" };
+      el.innerHTML = S.holds.map((h) => {
+        const who = (h.names || []).map((n, i) => {
+          const seat = (h.seats || [])[i] || "?";
+          const b = berth[(h.seat_types || [])[i]];
+          return `<li><span>${esc(n)}</span><b>seat ${esc(seat)}${b ? ` <em>${b}</em>` : ""}</b></li>`;
+        }).join("");
+        return `<div class="card hold">
         <div class="hold-top">
-          <div><div class="hold-title">${esc(h.from)} → ${esc(h.to)}</div>
-            <div class="muted small">${esc(fmtDate(h.date))} · train ${esc(h.train)} · ${esc(cls(h.cls))}</div></div>
-          <div class="timer" data-order="${esc(h.order)}"></div>
+          <div><div class="hold-badge">Held for you · pay to keep it</div>
+            <div class="hold-title">${esc(h.from)} → ${esc(h.to)}</div>
+            <div class="muted small">${esc(fmtDay(h.date))} · ${h.dep ? span(h.dep, h.arr) + " · " : ""}train ${esc(h.train)}</div></div>
+          <div class="timer-box"><div class="timer" data-order="${esc(h.order)}"></div><div class="muted small">left to pay</div></div>
         </div>
         <div class="kv">
+          <div><span>Class</span><b>${esc(cls(h.cls))}</b></div>
           <div><span>Car</span><b>${esc(h.car)}</b></div>
-          <div><span>Seats</span><b>${esc((h.seats || []).join(", ") || "–")}</b></div>
-          <div><span>Passengers</span><b>${esc((h.names || []).join(", "))}</b></div>
           <div><span>Total</span><b>${fmtSum(h.total)} so'm</b></div>
+          <div><span>Renewals</span><b>${h.renewals || 0} of ${S.maxRenewals}</b></div>
         </div>
+        <ul class="seats-list">${who}</ul>
         <div class="row-btns">
           <button class="btn danger sm" data-cancel="${esc(h.order)}">Cancel</button>
-          ${h.pay_url ? `<button class="btn primary sm" data-open="${esc(h.pay_url)}">Pay now</button>` : ""}
+          ${h.pay_url ? `<button class="btn primary sm" data-open="${esc(h.pay_url)}">Pay ${fmtSum(h.total)} so'm</button>` : ""}
         </div>
-      </div>`).join("");
+      </div>`;
+      }).join("");
     }
     tickTimers();
   }
@@ -144,7 +235,7 @@
   /* ---------------------------------------------------------------- trips */
   let tripsSig = "";
   function renderTrips() {
-    const sig = JSON.stringify(S.trips);
+    const sig = JSON.stringify([S.trips, S.holds.map((h) => [h.trip, h.passengers]), S.done, S.pax, S.today]);
     if (sig === tripsSig) return;
     tripsSig = sig;
     const el = $("#trips");
@@ -155,24 +246,47 @@
     }
     el.innerHTML = S.trips.map((t) => {
       const dates = [...t.dates].sort();
-      const shown = dates.slice(0, 6).map(fmtDate).join(", ") + (dates.length > 6 ? ` +${dates.length - 6}` : "");
+      const future = dates.filter((d) => d >= S.today);
+      const done = new Set((S.done || {})[t.id] || []);
+      const held = new Set(S.holds.filter((h) => h.trip === t.id).flatMap((h) => h.passengers || []));
+      const allDone = t.mode === "buy" && t.passengers.length && t.passengers.every((p) => done.has(p));
+      const status = !t.active ? ["", "Paused"] : !future.length ? ["", "Dates passed"] : allDone ? ["ok", "Everyone has a ticket"]
+        : held.size ? ["warn", "Seats held"] : ["ok", "Watching"];
+      const pax = t.mode === "buy" ? t.passengers.map((p, i) => {
+        const tag = done.has(p) ? '<em class="okc">ticket</em>' : held.has(p) ? '<em class="warnc">seat held</em>' : "";
+        return `<li><span class="n">${i + 1}</span>${esc((S.pax || {})[p] || "Passenger")} ${tag}</li>`;
+      }).join("") : "";
+      const multi = t.mode === "buy" && t.passengers.length > 1;
       return `<div class="card trip ${t.active ? "" : "off"}">
-        <div class="trip-main">
+        <div class="trip-top">
           <div class="trip-route">${esc(t.from.name)} <span class="arrow">→</span> ${esc(t.to.name)}</div>
-          <div class="muted small">${esc(shown)}</div>
-          <div class="tags">
-            <span class="tag g">${t.mode === "buy" ? "Auto-buy" : "Notify only"}</span>
-            ${t.classes.map((c) => `<span class="tag">${esc(cls(c))}</span>`).join("")}
-            ${t.maxPrice ? `<span class="tag">≤ ${fmtSum(t.maxPrice)} so'm</span>` : ""}
-            ${t.mode === "buy" ? `<span class="tag">${t.passengers.length} passenger${t.passengers.length === 1 ? "" : "s"}</span>` : ""}
-            ${t.train ? `<span class="tag">train ${esc(t.train)}</span>` : ""}
-          </div>
+          <span class="pill ${status[0]}">${status[1]}</span>
+          <label class="switch" title="${t.active ? "Pause this trip" : "Resume this trip"}">
+            <input type="checkbox" data-trip="${esc(t.id)}" ${t.active ? "checked" : ""}><span></span></label>
         </div>
-        <label class="switch" title="${t.active ? "Pause this trip" : "Resume this trip"}">
-          <input type="checkbox" data-trip="${esc(t.id)}" ${t.active ? "checked" : ""}><span></span></label>
+        <div class="dates">${dates.map((d) => `<span class="date ${d < S.today ? "past" : ""}">${esc(fmtDay(d))}</span>`).join("")}</div>
+        <div class="tags">
+          <span class="tag g">${t.mode === "buy" ? "Auto-buy" : "Notify only"}</span>
+          ${t.classes.map((c) => `<span class="tag">${esc(cls(c))}</span>`).join("") || '<span class="tag">Any class</span>'}
+          <span class="tag">${t.maxPrice ? `up to ${fmtSum(t.maxPrice)} so'm` : "Any price"}</span>
+          <span class="tag">${t.trains && t.trains.length ? `Only train ${esc(t.trains.join(", "))}` : "All trains"}</span>
+          ${multi ? `<span class="tag">${t.together ? "Together in one car" : "May be split"}</span>` : ""}
+        </div>
+        ${pax ? `<ol class="pax">${pax}</ol>` : ""}
+        <div class="trip-foot">
+          <span class="muted small">Edit in Telegram: Trips &amp; settings</span>
+          <button class="btn ghost sm" data-del="${esc(t.id)}">Delete</button>
+        </div>
       </div>`;
     }).join("");
   }
+  $("#trips").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-del]");
+    if (!b || !confirm("Delete this trip? The bot stops watching it.")) return;
+    await api("/api/trip/delete", { id: b.dataset.del });
+    toast("Trip deleted");
+    refresh();
+  });
   $("#trips").addEventListener("change", async (e) => {
     const i = e.target.closest("[data-trip]");
     if (!i) return;
@@ -188,7 +302,10 @@
     session_start: null, heartbeat: null, notify: null, plan: null, miniapp: null, http: null, ws: null, check: null,
     start: (o) => [o.updated_from ? "ok" : "", o.updated_from ? `Updated v${o.updated_from} → v${o.version} and restarted` : `Bot v${o.version} started on this PC`],
     stop: () => ["", "Bot stopped"],
-    state: (o) => (o.state === "watching" ? null : ["", `Status: ${o.state}${o.detail ? ` (${o.detail})` : ""}`]),
+    state: (o) => (o.state === "watching" ? null : o.state === "offline" ? ["bad", "Lost the connection to the railway site"]
+      : ["", `Status: ${o.state}${o.detail ? ` (${o.detail})` : ""}`]),
+    trip_trains: (o) => ["", o.trains.length ? `Trip now watches only train ${o.trains.join(", ")}` : "Trip now watches all trains"],
+    trip_deleted: () => ["", "Trip deleted"],
     availability: (o) => o.free > 0
       ? ["ok", `${o.free} seat${o.free === 1 ? "" : "s"} · ${cls(o.cls)} · train ${o.train} · ${fmtDate(o.date)} · ${fmtSum(o.price)} so'm`]
       : ["", `Seats sold out again on train ${o.train} (${cls(o.cls)})`],
@@ -241,18 +358,36 @@
       for (const row of r.rows) {
         lastTs = Math.max(lastTs, row.ts);
         const d = describe(row);
-        if (d) rows.push({ t: row.t, tone: d[0], text: d[1] });
+        if (!d) continue;
+        const last = rows[rows.length - 1];
+        if (last && last.text === d[1]) { last.n += 1; last.t = row.t; continue; }   // "Network problem ×6"
+        rows.push({ t: row.t, kind: row.kind, tone: d[0], text: d[1], n: 1 });
       }
       if (rows.length > 400) rows.splice(0, rows.length - 400);
       if (r.rows.length && view === "activity") renderFeed();
     } catch (e) { /* the app may be closing */ }
   }
 
+  const BOOKING = new Set(["availability", "detect", "fanout", "reserve_sent", "reserve_refused", "settled", "held",
+    "extra_hold_cancelled", "seats_gone", "missed", "pay_link", "renew_attempt", "hold_end", "paid", "user_cancel_hold",
+    "recover_hold"]);
+  let filter = "all";
+  $("#filters").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-f]");
+    if (!b) return;
+    filter = b.dataset.f;
+    $$("#filters .chip").forEach((x) => x.classList.toggle("on", x === b));
+    renderFeed();
+  });
   function renderFeed() {
     const el = $("#feed");
-    if (!rows.length) { el.innerHTML = '<p class="empty">Nothing yet.</p>'; return; }
-    el.innerHTML = rows.slice().reverse().map((r) =>
-      `<div class="ev ${r.tone}"><time>${esc(r.t.slice(0, 8))}</time><i></i><span>${esc(r.text)}</span></div>`).join("");
+    const list = rows.filter((r) => filter === "all" || (filter === "book" ? BOOKING.has(r.kind) : r.tone === "bad" || r.tone === "warn"));
+    if (!list.length) {
+      el.innerHTML = `<p class="empty">${filter === "bad" ? "No problems so far." : filter === "book" ? "No seats seen yet." : "Nothing yet."}</p>`;
+      return;
+    }
+    el.innerHTML = list.slice().reverse().map((r) =>
+      `<div class="ev ${r.tone}"><time>${esc(r.t.slice(0, 8))}</time><i></i><span>${esc(r.text)}${r.n > 1 ? ` <em class="x">×${r.n}</em>` : ""}</span></div>`).join("");
   }
 
   /* ---------------------------------------------------------------- updates */
@@ -377,7 +512,7 @@
     const r = await api("/api/setup/confirm");
     if (!r.ok) { toast(r.error); return; }
     setupShow(3);
-    toast("Linked! Open the bot and tap 🚆 Trips & settings.");
+    toast("Linked! Open the bot and tap Trips & settings.");
     refresh();
   });
 

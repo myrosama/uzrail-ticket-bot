@@ -18,6 +18,7 @@
     <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5-10-6.5z" fill="currentColor"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9l3 3-3 3M13 15h4"/></g></symbol>
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
   </svg>
 
@@ -87,31 +88,47 @@
           <p class="muted" id="subline"></p>
           <div class="stats">
             <div class="stat"><b id="stAge">–</b><span>last check</span></div>
-            <div class="stat"><b id="stRate">–</b><span>checks / min</span></div>
-            <div class="stat"><b id="stMs">–</b><span>response</span></div>
+            <div class="stat"><b id="stRate">–</b><span>checks per minute</span></div>
+            <div class="stat"><b id="stMs">–</b><span>railway response</span></div>
+            <div class="stat"><b id="stHolds">–</b><span id="stHoldsSub">holds this session</span></div>
           </div>
           <div class="row-btns center">
             <button class="btn ghost" id="pauseBtn"><svg><use href="#i-pause"/></svg><span>Pause</span></button>
+            <button class="btn ghost" data-console title="Every check and booking step, live"><svg><use href="#i-terminal"/></svg>Live console</button>
             <button class="btn primary" data-act="telegram"><svg><use href="#i-send"/></svg>Open Telegram bot</button>
           </div>
         </div>
+        <div class="banner bad" id="netBanner" hidden></div>
         <div class="banner" id="updBanner" hidden></div>
         <div id="holds"></div>
+        <div class="section-head" id="boardHead" hidden>
+          <h2>Right now on the railway site</h2>
+          <span class="legend"><i class="c ok">matches your trip</i><i class="c over">above your max price</i><i class="c zero">sold out</i><i class="c other">not chosen</i></span>
+        </div>
+        <div id="board"></div>
       </section>
 
       <section class="page" data-page="trips" hidden>
         <header class="page-head">
           <h1>Trips</h1>
-          <p class="muted">Add and edit trips in Telegram: open your bot and tap <b>🚆 Trips &amp; settings</b>.</p>
+          <p class="muted">Add and edit trips in Telegram: open your bot and tap <b>Trips &amp; settings</b>.</p>
         </header>
         <div id="trips"></div>
       </section>
 
       <section class="page" data-page="activity" hidden>
         <header class="page-head">
-          <h1>Activity</h1>
+          <div class="head-row">
+            <h1>Activity</h1>
+            <button class="btn ghost sm" data-console><svg><use href="#i-terminal"/></svg>Open live console</button>
+          </div>
           <p class="muted">What the bot did since it started. The full record is in the data folder (logs).</p>
         </header>
+        <div class="filters" id="filters">
+          <button class="chip on" data-f="all">All</button>
+          <button class="chip" data-f="book">Seats &amp; bookings</button>
+          <button class="chip" data-f="bad">Problems</button>
+        </div>
         <div class="card feed" id="feed"><p class="empty">Nothing yet.</p></div>
       </section>
 

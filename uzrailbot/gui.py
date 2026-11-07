@@ -107,11 +107,12 @@ class App:
         recent = [ms for ts, ms in self.checks if now - ts < 60]
         s = self.engine.snapshot() if self.engine else {"state": "setup" if not self.store.is_configured() else "starting",
                                                          "detail": "", "last_check": 0, "live": False, "holds": [],
-                                                         "trips": self.store.trips()}
+                                                         "trips": self.store.trips(), "board": [], "stats": {}}
         holds = []
         for h in self.store.state.get("holds", {}).values():
-            holds.append({k: h.get(k) for k in ("order", "train", "car", "seats", "names", "total", "from", "to",
-                                                "date", "dep", "pay_url", "renewals", "cls")}
+            holds.append({k: h.get(k) for k in ("order", "trip", "passengers", "train", "car", "seats", "seat_types",
+                                                "names", "total", "from", "to", "date", "dep", "arr", "pay_url",
+                                                "renewals", "cls")}
                          | {"left": max(0, int(h["expires_at"] - now))})
         email, _ = self.store.railway_login()
         tg = self.store.cfg["telegram"]
@@ -125,6 +126,10 @@ class App:
             "autostart": autostart.is_enabled(), "dataDir": str(paths.app_dir()),
             "telegramOk": bool(self.bot.healthy) if self.bot else None,
             "update": self.updater.status, "autoUpdate": bool(self.store.cfg.get("auto_update", True)),
+            "board": s.get("board", []), "stats": s.get("stats", {}), "offlineSince": s.get("offline_since") or 0,
+            "pax": {p["id"]: p["name"] for p in self.engine.passenger_list()} if self.engine else {},
+            "done": self.store.state.get("done", {}), "maxRenewals": int(self.store.cfg.get("max_renewals", 3)),
+            "today": time.strftime("%Y-%m-%d", time.gmtime(now + 5 * 3600)),     # Tashkent date
         }
 
     # ---------------------------------------------------------------- setup (bot token + owner)
@@ -192,6 +197,14 @@ class App:
             return {"ok": True}
         if path == "/api/trip":
             ok = self.store.set_trip_active(str(body.get("id")), bool(body.get("active")))
+            return {"ok": ok}
+        if path == "/api/console":
+            from .live import open_window
+            ok = open_window()
+            return {"ok": ok, "error": "" if ok else "No terminal app found. Run: uzrailbot live"}
+        if path == "/api/trip/delete":
+            ok = self.store.delete_trip(str(body.get("id")))
+            rec.ev("trip_deleted", trip=str(body.get("id")), source="app")
             return {"ok": ok}
         if path == "/api/cancel":
             ok = self.engine.cancel_hold(str(body.get("order"))) if self.engine else False
@@ -335,6 +348,7 @@ class App:
             pystray.MenuItem(lambda _i: "Resume watching" if self.store.cfg.get("paused") else "Pause watching",
                              toggle_pause),
             pystray.MenuItem("Open the Telegram bot", lambda *_: self.handle("POST", "/api/open", {"target": "telegram"})),
+            pystray.MenuItem("Open live console", lambda *_: self.handle("POST", "/api/console", {})),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", lambda *_: self.quit()),
         )

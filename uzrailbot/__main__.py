@@ -345,7 +345,10 @@ def main():
         watch(args[1:])
     elif cmd == "live":
         from .live import main as live_main
-        live_main()
+        try:
+            live_main()
+        except KeyboardInterrupt:
+            pass
     else:
         print(__doc__)
 

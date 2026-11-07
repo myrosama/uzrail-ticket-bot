@@ -98,6 +98,16 @@ def normalize_trip(t: dict) -> dict:
         speed = min(4, max(1, int(t.get("speed") or 1)))
     except (TypeError, ValueError):
         speed = 1
+    # only these train numbers (empty = every train on the route); older configs had one "train" string
+    raw = t.get("trains")
+    if raw is None:
+        raw = [t["train"]] if str(t.get("train") or "").strip() else []
+    trains = []
+    for n in raw if isinstance(raw, list) else []:
+        n = str(n).strip()[:8]
+        if n and n not in trains:
+            trains.append(n)
+    trains = trains[:20]
     return {
         "id": str(t.get("id") or uuid.uuid4().hex[:8]),
         "from": frm,
@@ -108,7 +118,7 @@ def normalize_trip(t: dict) -> dict:
         "mode": mode,
         "passengers": passengers,
         "speed": speed,
-        "train": str(t.get("train") or "").strip()[:8],
+        "trains": trains,
         "together": bool(t.get("together", False)),
         "active": bool(t.get("active", True)),
     }
@@ -119,6 +129,14 @@ class Store:
         self.lock = threading.RLock()
         self.cfg = _read(paths.config_path(), CONFIG_DEFAULTS)
         self.state = _read(paths.state_path(), STATE_DEFAULTS)
+        # trips saved by older versions get the current fields (e.g. v0.2 "train" -> v0.3 "trains")
+        upgraded = []
+        for t in self.cfg.get("trips") or []:
+            try:
+                upgraded.append(normalize_trip(t))
+            except (ValueError, KeyError, TypeError):
+                upgraded.append(dict(t, trains=t.get("trains") or []))
+        self.cfg["trips"] = upgraded
 
     def save(self):
         with self.lock:
