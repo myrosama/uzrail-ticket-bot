@@ -355,7 +355,10 @@ class App:
             return "#E5484D"
         return "#08BFA8"
 
-    def start_tray(self):
+    def start_tray(self, shared_loop: bool = False):
+        """shared_loop: the window's event loop also drives the icon (macOS always; Linux when the GTK window is
+        used: GTK allows one main loop, and an icon running its own loop in a thread stops the window from
+        starting - found by the installer test on Ubuntu)."""
         try:
             import pystray
         except Exception:              # not installed, or no display at all (Linux: Xlib DisplayNameError)
@@ -378,26 +381,27 @@ class App:
         color = self._tray_color()
         self.tray = pystray.Icon("uzrailbot", self._tray_icon(color), "UzRail Bot", menu)
 
-        if sys.platform == "darwin":
-            # macOS: the menu-bar icon must live on the main thread; run_detached() hooks it into the event loop
-            # the window runs (pystray's documented way to share it). Its colour can't be changed from another
-            # thread there, so it stays as it is.
+        if shared_loop:
+            # run_detached() hooks the icon into the event loop the window runs (pystray's documented way to
+            # share it). macOS: Cocoa can't be touched from another thread, so the icon keeps its colour there.
             try:
                 self.tray.run_detached()
             except Exception:
-                log.exception("menu-bar icon unavailable")
-                self.tray = None
-            return
-
-        def run_tray():
-            try:
-                self.tray.run()
-            except Exception:          # e.g. no tray support on this Linux desktop
                 log.exception("tray icon unavailable")
-                self.tray = None       # then closing the window quits instead of hiding
-        threading.Thread(target=run_tray, daemon=True, name="tray").start()
+                self.tray = None
+                return
+            if sys.platform == "darwin":
+                return
+        else:
+            def run_tray():
+                try:
+                    self.tray.run()
+                except Exception:      # e.g. no tray support on this Linux desktop
+                    log.exception("tray icon unavailable")
+                    self.tray = None   # then closing the window quits instead of hiding
+            threading.Thread(target=run_tray, daemon=True, name="tray").start()
 
-        def refresh():
+        def refresh():                 # colour + tooltip follow the state (pystray marshals this to its loop)
             last = color
             while True:
                 time.sleep(2)
@@ -429,11 +433,12 @@ class App:
         log.info("UzRail Bot %s, recording to %s, UI at http://127.0.0.1:%d", __version__, folder, PORT)
         if self.store.is_configured():
             threading.Thread(target=self.start_services, daemon=True).start()
-        self.start_tray()
         try:
             import webview
         except Exception:              # not installed or no window system: use the browser instead
             webview = None
+        # Windows: the icon runs its own loop in a thread. macOS/Linux with the window: one shared loop.
+        self.start_tray(shared_loop=webview is not None and os.name != "nt")
         if webview is None:
             self._browser_fallback()
             return
