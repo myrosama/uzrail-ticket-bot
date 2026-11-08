@@ -63,6 +63,13 @@
   const classLabel = (c) => { const k = classMeta(c); return `${k.name} ${k.sub}`; };
   const shortClass = (c) => { const k = classMeta(c); return k.name === "Sitting" || !CLASSES.some((x) => x.c === c) ? `${k.name} ${k.sub.replace("class ", "")}` : k.name; };
   const haptic = () => { try { tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged(); } catch (e) { /* older clients */ } };
+  const newer = (v) => inTelegram && tg.isVersionAtLeast && tg.isVersionAtLeast(v);
+  // Ask before Telegram closes the app with unsaved edits (Bot API 6.2+).
+  const closingConfirm = (on) => { if (newer("6.2")) { try { on ? tg.enableClosingConfirmation() : tg.disableClosingConfirmation(); } catch (e) { /* */ } } };
+  // In the long editor a swipe down while scrolling would close the app (7.7+): allow it only on the home page.
+  const swipes = (on) => { if (newer("7.7")) { try { on ? tg.enableVerticalSwipes() : tg.disableVerticalSwipes(); } catch (e) { /* */ } } };
+  const refocus = (sel) => { const el = document.querySelector(sel); if (el) el.focus({ preventScroll: true }); return !!el; };
+  const confirmThen = (msg, go) => { if (inTelegram && tg.showConfirm) tg.showConfirm(msg, (ok) => ok && go()); else if (confirm(msg)) go(); };
 
   function toast(msg, ms = 2600) {
     const t = $("#toast");
@@ -75,7 +82,7 @@
   function send(payload) {
     const data = JSON.stringify(payload);
     if (data.length > 4000) { toast("Too much data for one save. Remove some dates."); return; }
-    if (inTelegram) { tg.sendData(data); return; }       // closes the Mini App; the bot replies in the chat
+    if (inTelegram) { closingConfirm(false); tg.sendData(data); return; }   // closes the Mini App; the bot replies
     console.log("sendData", payload);
     toast("Preview mode: open this page from your bot to save.");
   }
@@ -86,7 +93,7 @@
     primaryHandler = handler;
     if (inTelegram) {
       const mb = tg.MainButton;
-      mb.setParams({ text, color: "#08bfa8", text_color: "#ffffff", is_active: enabled, is_visible: !!handler });
+      mb.setParams({ text, color: "#00796b", text_color: "#ffffff", is_active: enabled, is_visible: !!handler });
       return;
     }
     const bar = $("#bottomBar"), btn = $("#primaryBtn");
@@ -201,6 +208,9 @@
   // ------------------------------------------------------------------ views
   function render(view, arg) {
     window.scrollTo(0, 0);
+    app.onclick = app.oninput = app.onchange = null;      // the editor's unsaved-changes watcher
+    closingConfirm(false);
+    swipes(view === "home");
     if (view === "home") return renderHome();
     if (view === "trip") return renderTrip(arg);
     if (view === "account") return renderAccount();
@@ -267,9 +277,7 @@
       el.querySelector('[data-act="edit"]').onclick = () => render("trip", t.id);
       el.querySelector('[data-act="toggle"]').onclick = () => send({ a: "toggle", id: t.id, active: !t.active });
       el.querySelector('[data-act="del"]').onclick = () => {
-        const go = () => send({ a: "del", id: t.id });
-        if (inTelegram && tg.showConfirm) tg.showConfirm("Delete this trip?", (ok) => ok && go());
-        else if (confirm("Delete this trip?")) go();
+        confirmThen("Delete this trip?", () => send({ a: "del", id: t.id }));
       };
       list.appendChild(el);
     }
@@ -294,7 +302,7 @@
 
     app.innerHTML = `
       <section class="card form-section">
-        <h3>Route</h3>
+        <h2>Route</h2>
         <div class="route">
           <div class="fields"><div id="fromBox"></div><div id="toBox"></div></div>
           <button class="swap" id="swap" aria-label="Swap stations">
@@ -304,7 +312,7 @@
       </section>
 
       <section class="card form-section">
-        <h3>Dates</h3>
+        <h2>Dates</h2>
         <div class="cal-head">
           <button class="icon-btn" id="prevM" aria-label="Previous month"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
           <strong id="monthName"></strong>
@@ -315,13 +323,13 @@
       </section>
 
       <section class="card form-section">
-        <h3>Trains on this route <span class="muted small" id="trainCount"></span></h3>
+        <h2>Trains on this route <span class="muted small" id="trainCount"></span></h2>
         <div id="trainList"></div>
         <p class="hint" id="trainHint"></p>
       </section>
 
       <section class="card form-section">
-        <h3>Ticket classes</h3>
+        <h2>Ticket classes</h2>
         <div class="chips" id="classes"></div>
         <details class="more-classes" id="otherClasses" hidden>
           <summary>Other classes <span class="muted" id="otherCount"></span></summary>
@@ -330,12 +338,12 @@
         <p class="hint" id="classHint"></p>
         <div class="field" style="margin-top:14px">
           <label for="maxPrice">Maximum price per ticket (optional)</label>
-          <input class="input" id="maxPrice" inputmode="numeric" placeholder="No limit">
+          <div class="input-wrap"><input class="input" id="maxPrice" inputmode="numeric" placeholder="No limit"><span class="suffix">so'm</span></div>
         </div>
       </section>
 
       <section class="card form-section">
-        <h3>When seats appear</h3>
+        <h2>When seats appear</h2>
         <div class="seg" id="mode">
           <button data-v="buy">Auto-buy</button>
           <button data-v="notify">Notify only</button>
@@ -344,7 +352,7 @@
       </section>
 
       <section class="card form-section" id="paxSection">
-        <h3 class="row-head">Passengers <button class="link-btn" id="paxRefresh" type="button">↻ Refresh list</button></h3>
+        <h2 class="row-head">Passengers <button class="link-btn" id="paxRefresh" type="button">↻ Refresh list</button></h2>
         <div class="pax" id="pax"></div>
         <p class="hint">Tap to choose (up to ${MAX_PAX}). The order is the priority: if fewer seats appear, the first ones get them.</p>
         <div class="divider"></div>
@@ -373,11 +381,21 @@
         box.querySelector("button").onclick = () => { d[key] = null; stationBox(key, label); box.querySelector("input").focus(); validate(); refreshRoute(); };
         return;
       }
-      box.innerHTML = `<input class="input" placeholder="${label}: type a station" autocomplete="off"><div class="suggest" hidden></div>`;
+      box.innerHTML = `<label for="st-${key}">${label}</label><input class="input" id="st-${key}"
+        placeholder="${key === "from" ? "e.g. Tashkent" : "e.g. Samarkand"}" autocomplete="off"><div class="suggest" hidden></div>`;
       const input = box.querySelector("input"), sug = box.querySelector(".suggest");
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); const first = sug.querySelector("button"); if (first) first.click(); }
+      });
       input.addEventListener("input", () => {
         const found = searchStations(input.value);
-        sug.hidden = !found.length;
+        if (!found.length) {
+          const typed = norm(input.value).length >= 2;
+          sug.hidden = !typed;
+          sug.innerHTML = typed ? `<div class="no-hit">${STATIONS.length ? "No station found. Try another spelling (English, Uzbek or Russian)." : "Loading stations…"}</div>` : "";
+          return;
+        }
+        sug.hidden = false;
         sug.innerHTML = found.map((s) => `<button data-c="${esc(s.c)}"><span>${esc(title(s.en))}</span><small>${esc(s.uz && norm(s.uz) !== norm(s.en) ? title(s.uz) : (s.uzb ? "" : "abroad"))}</small></button>`).join("");
         sug.querySelectorAll("button").forEach((b) => {
           b.onclick = () => {
@@ -411,14 +429,15 @@
         const k = iso(dt);
         const off = dt < t0 || dt > last;
         const cls = ["day", d.dates.includes(k) ? "on" : "", k === iso(t0) ? "today" : ""].join(" ");
-        html += `<button class="${cls}" data-d="${k}" ${off ? "disabled" : ""}>${day}</button>`;
+        const name = dt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
+        html += `<button class="${cls}" data-d="${k}" aria-label="${name}" aria-pressed="${d.dates.includes(k)}" ${off ? "disabled" : ""}>${day}</button>`;
       }
       $("#cal").innerHTML = html;
       $("#cal").querySelectorAll(".day:not(:disabled)").forEach((b) => {
         b.onclick = () => {
           const k = b.dataset.d;
           d.dates = d.dates.includes(k) ? d.dates.filter((x) => x !== k) : [...d.dates, k].sort();
-          haptic(); drawCal(); validate(); refreshRoute();
+          haptic(); drawCal(); validate(); refreshRoute(); refocus(`.day[data-d="${k}"]`);
         };
       });
       $("#chosen").innerHTML = d.dates.map((x) => `<span class="tag green">${fmtDay(x)}</span>`).join("") ||
@@ -448,7 +467,7 @@
       const extra = Object.keys(count).filter((c) => !CLASSES.some((k) => k.c === c)).map(classMeta);
       const main = known ? [...CLASSES.filter((k) => count[k.c]), ...extra] : CLASSES;
       const rest = known ? CLASSES.filter((k) => !count[k.c]) : [];
-      const chip = (k) => `<button class="chip ${d.classes.includes(k.c) ? "on" : ""}" data-c="${k.c}">
+      const chip = (k) => `<button class="chip ${d.classes.includes(k.c) ? "on" : ""}" data-c="${k.c}" aria-pressed="${d.classes.includes(k.c)}">
         <span class="check">✓</span>${esc(k.name)}<span class="muted">${esc(k.sub)}${count[k.c] ? ` · ${count[k.c]} train${count[k.c] === 1 ? "" : "s"}` : ""}</span></button>`;
       $("#classes").innerHTML = main.map(chip).join("");
       $("#classesOther").innerHTML = rest.map(chip).join("");
@@ -459,7 +478,7 @@
         b.onclick = () => {
           const c = b.dataset.c;
           d.classes = d.classes.includes(c) ? d.classes.filter((x) => x !== c) : [...d.classes, c];
-          haptic(); drawClasses();
+          haptic(); drawClasses(); refocus(`.chip[data-c="${c}"]`);
         };
       });
       const what = !d.from || !d.to ? "Pick the route to see which classes its trains have. "
@@ -469,13 +488,14 @@
     }
     drawClasses();
     const mp = $("#maxPrice");
+    mp.classList.add("has-suffix");
     mp.value = d.maxPrice ? fmtSum(d.maxPrice) : "";
     mp.oninput = () => { const v = mp.value.replace(/\D/g, ""); d.maxPrice = v ? parseInt(v, 10) : 0; };
     mp.onblur = () => { mp.value = d.maxPrice ? fmtSum(d.maxPrice) : ""; };
 
     // mode
     function drawMode() {
-      $("#mode").querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === d.mode));
+      $("#mode").querySelectorAll("button").forEach((b) => { b.classList.toggle("on", b.dataset.v === d.mode); b.setAttribute("aria-pressed", b.dataset.v === d.mode); });
       $("#modeHint").textContent = d.mode === "buy"
         ? "Holds the seats at once and sends you a Pay button (12 minutes to pay)."
         : "Just sends you a message with the free seats.";
@@ -502,24 +522,25 @@
         const idx = chosen.indexOf(p.i);
         const on = idx >= 0;
         return `<div class="pax-row ${on ? "on" : ""}" data-i="${esc(p.i)}">
-          <span class="order">${on ? idx + 1 : ""}</span><span class="name">${esc(p.n)}</span>
+          <button class="pax-pick" type="button" aria-pressed="${on}"${on ? ` aria-label="${esc(p.n)}, priority ${idx + 1}"` : ""}><span class="order" aria-hidden="true">${on ? idx + 1 : ""}</span><span class="name">${esc(p.n)}</span></button>
           ${on ? `<button class="mini" data-up ${idx === 0 ? "disabled" : ""} aria-label="Move up">▲</button>
                   <button class="mini" data-down ${idx === chosen.length - 1 ? "disabled" : ""} aria-label="Move down">▼</button>` : ""}
         </div>`;
       }).join("");
       $("#pax").querySelectorAll(".pax-row").forEach((row) => {
         const id = row.dataset.i;
-        row.onclick = (e) => {
-          if (e.target.closest("[data-up],[data-down]")) return;
+        row.querySelector(".pax-pick").onclick = () => {
           if (d.passengers.includes(id)) d.passengers = d.passengers.filter((x) => x !== id);
           else if (d.passengers.length < MAX_PAX) d.passengers.push(id);
           else { toast(`Up to ${MAX_PAX} passengers per booking`); return; }
-          haptic(); drawPax(); validate();
+          haptic(); drawPax(); validate(); refocus(`.pax-row[data-i="${CSS.escape(id)}"] .pax-pick`);
         };
         const move = (dir) => {
           const i = d.passengers.indexOf(id), j = i + dir;
           [d.passengers[i], d.passengers[j]] = [d.passengers[j], d.passengers[i]];
           haptic(); drawPax();
+          refocus(`.pax-row[data-i="${CSS.escape(id)}"] ${dir < 0 ? "[data-up]" : "[data-down]"}:not(:disabled)`) ||
+            refocus(`.pax-row[data-i="${CSS.escape(id)}"] .pax-pick`);
         };
         const up = row.querySelector("[data-up]"), down = row.querySelector("[data-down]");
         if (up) up.onclick = () => move(-1);
@@ -528,11 +549,8 @@
     }
     drawPax();
     $("#paxRefresh").onclick = () => {
-      const go = () => send({ a: "pax" });
-      const msg = "Reload your saved passengers? This page closes (unsaved changes here are lost); the bot replies " +
-                  "with the fresh list and a new 🚆 Trips & settings button.";
-      if (inTelegram && tg.showConfirm) tg.showConfirm(msg, (ok) => ok && go());
-      else if (confirm(msg)) go();
+      confirmThen("Reload your saved passengers? This page closes (unsaved changes here are lost); the bot replies " +
+                  "with the fresh list and a new 🚆 Trips & settings button.", () => send({ a: "pax" }));
     };
     $("#together").checked = !!d.together;
     $("#together").onchange = (e) => { d.together = e.target.checked; };
@@ -540,7 +558,7 @@
     // advanced
     $("#speed").innerHTML = SPEEDS.map((s) => `<button data-v="${s.v}">${s.label}<br><span class="muted">${s.sub}</span></button>`).join("");
     function drawSpeed() {
-      $("#speed").querySelectorAll("button").forEach((b) => { b.classList.toggle("on", +b.dataset.v === d.speed); b.style.height = "52px"; b.style.lineHeight = "1.2"; });
+      $("#speed").querySelectorAll("button").forEach((b) => { b.classList.toggle("on", +b.dataset.v === d.speed); b.setAttribute("aria-pressed", +b.dataset.v === d.speed); b.style.height = "52px"; b.style.lineHeight = "1.2"; });
       $("#moreSum").textContent = `${SPEEDS.find((s) => s.v === d.speed).label} speed`;
     }
     $("#speed").querySelectorAll("button").forEach((b) => { b.onclick = () => { d.speed = +b.dataset.v; haptic(); drawSpeed(); }; });
@@ -580,7 +598,7 @@
       const all = !d.trains.length;
       const LIMIT = 6;
       const shown = showAll ? rows : rows.filter((t, i) => i < LIMIT || d.trains.includes(t.n));
-      list.innerHTML = `<button class="train-row all ${all ? "on" : ""}" data-t="*"><span class="tick">✓</span>
+      list.innerHTML = `<button class="train-row all ${all ? "on" : ""}" data-t="*" aria-pressed="${all}"><span class="tick" aria-hidden="true">✓</span>
           <span class="t-main"><b>All trains</b><small>Watch every train on the route (recommended)</small></span></button>` +
         shown.map((t) => {
           const runs = d.dates.map((x) => runsOn(t, x));
@@ -590,8 +608,8 @@
             : some ? `<em>runs on ${runs.filter((x) => x !== false).length} of ${d.dates.length} dates</em>`
             : runText(t.r, t.w) ? `<em>${esc(runText(t.r, t.w))}</em>` : "";
           const cls = t.c.map((c) => `<i>${esc(tag(c))}</i>`).join("");
-          return `<button class="train-row ${d.trains.includes(t.n) ? "on" : ""} ${no ? "dim" : ""}" data-t="${esc(t.n)}">
-            <span class="tick">✓</span>
+          return `<button class="train-row ${d.trains.includes(t.n) ? "on" : ""} ${no ? "dim" : ""}" data-t="${esc(t.n)}" aria-pressed="${d.trains.includes(t.n)}">
+            <span class="tick" aria-hidden="true">✓</span>
             <span class="t-main"><b>${esc(t.n)}</b><small>${esc(t.b)}</small></span>
             <span class="t-time">${esc(t.dep || "")}${t.dep ? " → " : ""}${esc(t.arr || "")}${t.nights ? `<sup>+${t.nights}</sup>` : ""}</span>
             <span class="t-cls">${cls}${note}</span>
@@ -609,7 +627,7 @@
           const n = b.dataset.t;
           if (n === "*") d.trains = [];
           else d.trains = d.trains.includes(n) ? d.trains.filter((x) => x !== n) : [...d.trains, n];
-          haptic(); drawTrains(); drawClasses();
+          haptic(); drawTrains(); drawClasses(); refocus(`.train-row[data-t="${CSS.escape(n)}"]`);
         };
       });
     }
@@ -640,6 +658,11 @@
       send({ a: "trip", trip });
     }
     validate();
+
+    const initial = JSON.stringify(d);
+    const dirty = () => JSON.stringify(d) !== initial;
+    app.onclick = app.oninput = app.onchange = () => setTimeout(() => closingConfirm(dirty()), 0);
+    setBack(() => dirty() ? confirmThen("Discard your changes to this trip?", () => render("home")) : render("home"));
   }
 
   // ------------------------------------------------------------------ account

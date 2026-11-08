@@ -587,11 +587,11 @@ class Bot:
                 return self.send("Pick at least one date first.")
             self.wiz["step"] = "classes"
             self.edit(mid, "📅 " + ", ".join(dt.date.fromisoformat(d).strftime("%d %b") for d in t["dates"]))
-            return self.send("🎫 Which <b>ticket classes</b>? Tap to select, then Done (nothing selected = any).",
+            return self.send("🎫 Which <b>ticket classes</b>? Tap to select, then Done (none selected means any class).",
                              self._cls_kb())
         if cmd == "cls":
             t["classes"].remove(arg) if arg in t["classes"] else t["classes"].append(arg)
-            return self.edit(mid, "🎫 Which <b>ticket classes</b>? Tap to select, then Done (nothing selected = any).",
+            return self.edit(mid, "🎫 Which <b>ticket classes</b>? Tap to select, then Done (none selected means any class).",
                              self._cls_kb())
         if cmd == "clsok":
             self.wiz["step"] = "price"
@@ -654,7 +654,7 @@ class Bot:
 
     def _ask_speed(self):
         self.wiz["step"] = "speed"
-        self.send("⚡ How often should I check? Faster = more requests to the railway site.", {"inline_keyboard": [
+        self.send("⚡ How often should I check? Faster checks send more requests to the railway site.", {"inline_keyboard": [
             [{"text": "Normal · every 0.8 s", "callback_data": "w:speed:1"}],
             [{"text": "Fast · every 0.4 s", "callback_data": "w:speed:2"}],
             [{"text": "Max · every 0.2 s", "callback_data": "w:speed:4"}]]})
@@ -770,7 +770,7 @@ class Bot:
         st = s.get("stats") or {}
         if st.get("detections") or st.get("holds"):
             fast = f" · fastest hold {st['fastest']} s" if st.get("fastest") else ""
-            lines.append(f"\n📈 Since start: {st['detections']} detections · {st['holds']} holds · {st['missed']} missed{fast}")
+            lines.append(f"\n📈 Since the bot started: seats showed up {st['detections']} times · held {st['holds']} · missed {st['missed']}{fast}")
         out, size = [], 0                               # Telegram allows 4096 characters; cut at a line
         for line in lines:
             if size + len(line) > 3900:

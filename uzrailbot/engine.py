@@ -634,7 +634,7 @@ class Engine:
                              "I keep watching and book again the moment it lets me.", 600)
         elif not held and sent:
             self.stats["missed"] += 1
-            rec.ev("missed", trip=trip["id"], train=number, cls=cls, why="seats taken before our hold settled")
+            rec.ev("missed", trip=trip["id"], train=number, cls=cls, why="the seats were taken before our booking went through")
             if time.time() - self.last_notice.get(("missed", trip["id"]), 0) > 60:
                 self.last_notice[("missed", trip["id"])] = time.time()
                 # message 2 of 3 (failure)
