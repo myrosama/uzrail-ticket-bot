@@ -758,7 +758,9 @@
       </div>
       <div id="paxSection">
         ${sec(7, "Passengers", "paxSum")}
-        <div class="card2"><div class="pax-top"><span>The bot books in this order.</span><button class="link" id="paxRefresh" type="button" style="font-size:13px">Refresh list</button></div><div id="pax"></div></div>
+        <div class="card2 clip"><div id="pax"></div>
+          <button class="add-p" id="addNew" type="button">${ms("person_add")}Add new passenger</button>
+          <button class="add-p" id="paxRefresh" type="button" style="color:var(--text-2)">${ms("history")}Refresh list</button></div>
         <label class="card2 row" style="margin-top:8px"><span class="inf"><b>Keep everyone together</b><small>Only hold seats when all passengers fit in the same car</small></span>
           <span class="switch"><input type="checkbox" id="together" aria-label="Keep everyone together"><span></span></span></label>
       </div>
@@ -913,42 +915,40 @@
     }
     $("#mode").querySelectorAll("button").forEach((b) => { b.onclick = () => { d.mode = b.dataset.v; haptic(); drawMode(); }; });
 
-    // passengers
-    let adding = false;
+    // passengers: tap in the order the bot should book them, tap again to remove
     function drawPax() {
       const chosen = d.passengers.filter((p) => S.pax.some((x) => x.i === p));
       d.passengers = chosen;
       $("#paxSum").textContent = `${chosen.length} of ${MAX_PAX}`;
       if (!S.pax.length) {
-        $("#pax").innerHTML = `<p class="pad">${S.email && S.hasPw ? "Your saved passengers aren't on this page yet. Tap Refresh list. If you have none, add them on eticket.uzrailpass.uz under My fellow travelers, then refresh."
+        $("#pax").innerHTML = `<p class="pad">${S.email && S.hasPw ? "Your saved passengers aren't on this page yet. Tap Refresh list."
           : "Connect your railway account first in Settings. Your saved passengers then appear here."}</p>`;
         return;
       }
-      const rest = S.pax.filter((x) => !chosen.includes(x.i));
-      $("#pax").innerHTML = chosen.map((id, i) => `<div class="pax-row" data-i="${esc(id)}"><span class="c">${i + 1}</span><span class="name">${esc(paxName(id))}</span>
-          <button class="icon-btn" data-up ${i === 0 ? "disabled" : ""} aria-label="Move up">${ms("expand_less")}</button>
-          <button class="icon-btn" data-down ${i === chosen.length - 1 ? "disabled" : ""} aria-label="Move down">${ms("expand_more")}</button>
-          <button class="icon-btn" data-rm aria-label="Remove">${ms("close")}</button></div>`).join("") +
-        (rest.length && chosen.length < MAX_PAX ? `<button class="add-p" id="addPax" aria-expanded="${adding}">${ms("add")}Add passenger</button>` : "") +
-        (adding ? rest.map((p) => `<button class="add-p" data-add="${esc(p.i)}" style="color:var(--text)">${esc(p.n)}</button>`).join("") : "");
-      $("#pax").querySelectorAll(".pax-row").forEach((row) => {
-        const id = row.dataset.i;
-        const move = (dir) => {
-          const i = d.passengers.indexOf(id), j = i + dir;
-          [d.passengers[i], d.passengers[j]] = [d.passengers[j], d.passengers[i]];
-          haptic(); drawPax();
-          refocus(`.pax-row[data-i="${CSS.escape(id)}"] ${dir < 0 ? "[data-up]" : "[data-down]"}:not(:disabled)`) || refocus(`.pax-row[data-i="${CSS.escape(id)}"] [data-rm]`);
+      const full = chosen.length >= MAX_PAX;
+      $("#pax").innerHTML = `<div class="slots-box"><div class="slots">${[0, 1, 2, 3].map((i) => {
+        const id = chosen[i];
+        return `<div class="slot ${id ? "on" : ""}"><small>${i + 1}</small><b>${id ? esc(paxName(id).split(" ")[0]) : "Empty"}</b></div>`;
+      }).join("")}</div><p>Tap people in the order the bot should book them. Tap again to remove.</p></div>` +
+        S.pax.map((p) => {
+          const idx = chosen.indexOf(p.i), on = idx >= 0;
+          return `<button class="pax-pick ${on ? "on" : ""}" data-i="${esc(p.i)}" aria-pressed="${on}" ${full && !on ? "disabled" : ""}${on ? ` aria-label="${esc(p.n)}, priority ${idx + 1}"` : ""}>
+            <span class="av">${esc(initials(p.n))}</span><span class="name">${esc(p.n)}</span><span class="mk ${on ? "on" : ""}">${on ? idx + 1 : ""}</span></button>`;
+        }).join("");
+      $("#pax").querySelectorAll(".pax-pick").forEach((b) => {
+        b.onclick = () => {
+          const id = b.dataset.i;
+          d.passengers = d.passengers.includes(id) ? d.passengers.filter((x) => x !== id) : [...d.passengers, id];
+          haptic(); drawPax(); validate(); refocus(`.pax-pick[data-i="${CSS.escape(id)}"]`);
         };
-        row.querySelector("[data-up]").onclick = () => move(-1);
-        row.querySelector("[data-down]").onclick = () => move(1);
-        row.querySelector("[data-rm]").onclick = () => { d.passengers = d.passengers.filter((x) => x !== id); haptic(); drawPax(); validate(); };
-      });
-      if ($("#addPax")) $("#addPax").onclick = () => { adding = !adding; haptic(); drawPax(); };
-      $("#pax").querySelectorAll("[data-add]").forEach((b) => {
-        b.onclick = () => { d.passengers.push(b.dataset.add); adding = d.passengers.length < MAX_PAX && adding; haptic(); drawPax(); validate(); };
       });
     }
     drawPax();
+    $("#addNew").onclick = () => {
+      const site = "https://eticket.uzrailpass.uz";       // saved passengers live on the railway site, not in the bot
+      toast("Add them under My fellow travelers, then tap Refresh list");
+      if (inTelegram) tg.openLink(site); else window.open(site, "_blank", "noopener");
+    };
     $("#paxRefresh").onclick = () => confirmThen("Reload your saved passengers? Unsaved changes on this page are lost, and the bot replies with the fresh list.", () => send({ a: "pax" }));
     $("#together").checked = !!d.together;
     $("#together").onchange = (e) => { d.together = e.target.checked; };
@@ -961,10 +961,10 @@
 
     // trains: every train by default; tap some to watch only those
     let routeKey = d.from && d.to ? d.from.code + ">" + d.to.code : "";
-    let showAll = false;
+    let showAll = false, any = !d.trains.length;
     function drawTrains() {
       const key = d.from && d.to ? d.from.code + ">" + d.to.code : "";
-      if (key !== routeKey) { d.trains = []; routeKey = key; showAll = false; }   // a new route: back to all trains
+      if (key !== routeKey) { d.trains = []; routeKey = key; showAll = false; any = true; }   // a new route: back to all trains
       const list = $("#trainList");
       if (!key) { list.innerHTML = `<p class="pad">Pick From and To to see the trains on this route.</p>`; $("#trainSum").textContent = ""; return; }
       if (!TT) { list.innerHTML = `<p class="pad">Loading the timetable…</p>`; return; }
@@ -976,26 +976,26 @@
       for (const n of d.trains) if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep: "", arr: "", nights: 0, r: null, w: null });
       const off = (t) => d.dates.length && d.dates.every((x) => runsOn(t, x) === false) ? 1 : 0;
       rows.sort((x, y) => off(x) - off(y) || (x.dep || "99").localeCompare(y.dep || "99"));
-      const all = !d.trains.length, LIMIT = 6;
-      $("#trainSum").textContent = all ? "Any train" : `${d.trains.length} of ${rows.length}`;
+      const LIMIT = 6;
+      $("#trainSum").textContent = any ? "Any train" : `${d.trains.length} of ${rows.length}`;
       if (!rows.length) { list.innerHTML = `<p class="pad">No trains for this route in the timetable. Every train is watched, and the bot shows the live list after you save.</p>`; return; }
       const shown = showAll ? rows : rows.filter((t, i) => i < LIMIT || d.trains.includes(t.n));
-      list.innerHTML = `<label class="row" style="min-height:52px"><span class="inf"><b>Any train</b></span><span class="switch"><input type="checkbox" id="anyTrain" aria-label="Any train" ${all ? "checked" : ""}><span></span></span></label>` +
+      list.innerHTML = `<label class="row" style="min-height:52px"><span class="inf"><b>Any train</b>${any ? "<small>Watching every train that runs on your dates</small>" : ""}</span><span class="switch"><input type="checkbox" id="anyTrain" aria-label="Any train" ${any ? "checked" : ""}><span></span></span></label>` +
         shown.map((t) => {
           const runs = d.dates.map((x) => runsOn(t, x));
           const no = d.dates.length && runs.every((x) => x === false) && !d.trains.includes(t.n);
           const some = d.dates.length && !no && runs.some((x) => x === false);
           const days = runText(t.r, t.w) || "Daily";
           const note = no ? "Doesn't run on your dates" : some ? `Runs on ${runs.filter((x) => x !== false).length} of ${d.dates.length} dates` : "";
-          const on = d.trains.includes(t.n);
-          return `<button class="tr-row" data-t="${esc(t.n)}" aria-pressed="${on}" ${no ? "disabled" : ""}><span class="box ${on ? "on" : ""}">${on ? ms("check") : ""}</span>
+          const on = !any && d.trains.includes(t.n);
+          return `<button class="tr-row ${any ? "off" : ""}" data-t="${esc(t.n)}" aria-pressed="${on}" ${no || any ? "disabled" : ""}><span class="box ${on ? "on" : ""}">${on ? ms("check") : ""}</span>
             <span class="inf"><span class="t1"><b>${esc(t.n)}</b><span>${esc(t.dep || "")}${t.dep ? " → " : ""}${esc(t.arr || "")}${t.nights ? `<sup>+${t.nights}</sup>` : ""}</span></span>
             <div class="t2">${esc(days)}${t.c.length ? ` · ${esc(t.c.map(shortClass).join(", "))}` : ""}</div>${note ? `<div class="t3">${note}</div>` : ""}</span></button>`;
         }).join("") +
         (rows.length > LIMIT ? `<button class="more-t" id="moreTrains" type="button">${showAll ? "Show fewer" : `Show all ${rows.length} trains`}</button>` : "");
       $("#anyTrain").onchange = (e) => {
-        if (e.target.checked) d.trains = [];
-        else toast("Tap the trains you want");
+        any = e.target.checked;
+        if (any) d.trains = [];
         haptic(); drawTrains(); drawClasses();
       };
       if ($("#moreTrains")) $("#moreTrains").onclick = () => { showAll = !showAll; drawTrains(); };
@@ -1088,7 +1088,7 @@
     const dark = inTelegram ? tg.colorScheme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     if (inTelegram) {
-      const bg = dark ? "#0D1310" : "#F2F4F1";
+      const bg = dark ? "#080C0A" : "#E6EBE7";
       try { tg.setHeaderColor(bg); tg.setBackgroundColor(bg); } catch (e) { /* older clients */ }
     }
   }
