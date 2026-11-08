@@ -10,14 +10,14 @@ date. The bot then reports the raw error in Telegram.
   plus `device-type: BROWSER` and `Accept-Language: en|ru|uz`.
 - `POST /api/v1/auth/login {username, password}` returns a JWT (60 minutes, sent as `Authorization: Bearer`).
   The bot logs in again shortly before it expires.
-- HTTP/1.1 only. The server closes idle keep-alive connections after about **1 second**:
+- HTTP/1.1 only. The server closes idle keep-alive connections after about 1 second:
 
   | Request | Time |
   | --- | --- |
-  | On a warm connection | 40–120 ms |
-  | On a new connection | 440–570 ms |
+  | On a warm connection | 40 to 120 ms |
+  | On a new connection | 440 to 570 ms |
 
-  That is why the bot checks every 0.8 s and not every second.
+  That is why the bot checks every 0.8 s, while its connection is still open.
 
 ## Endpoints the bot uses
 
@@ -36,7 +36,7 @@ date. The bot then reports the raw error in Telegram.
 Sold-out trains are still listed, so the train numbers are known before any seat appears. There is no live
 seat feed: availability has to be polled. The websocket only carries events for your own orders.
 
-Class codes are stable across languages. The names are not.
+Class codes are the same in every language; the class names change with the language.
 
 | Code | Class |
 | --- | --- |
@@ -48,7 +48,7 @@ Class codes are stable across languages. The names are not.
 | `2В` | Sitting, 2nd class |
 | `1В` | Sitting, 1st class |
 
-## Booking is one request, decided a moment later
+## How booking works
 
 The reserve body is the website's own. Two fields are required:
 
@@ -61,37 +61,40 @@ Up to 4 passengers fit in one order.
 | --- | --- |
 | ~80 ms | The reply is an order id. Nothing is held yet. |
 | ~0.12 s | websocket `ORDER_CREATED` |
-| ~1.1–2 s | websocket `PAYMENT_STARTED`: the seats are held and the full order is included. Or `ORDER_FAILED`: the seat was already taken. |
+| ~1.1 to 2 s | websocket `PAYMENT_STARTED`: the seats are held and the full order is included. Or `ORDER_FAILED`: the seat was already taken. |
 | 12 min | Payment deadline. After it, the railway releases the seats. |
 
 - The order snapshot endpoint (`get-snapshot`) is heavily rate-limited, so the bot waits on the websocket
   instead.
-- The same passenger can hold two orders at once. So a hold can be renewed by booking the new order before
-  cancelling the old one, with no gap.
+- The same passenger can hold two orders at once, so the bot itself has to make sure it books each passenger
+  only once.
 
 ## Timing measured on the live site
 
-- **A freed seat is invisible to everyone for a while.** When a hold is cancelled, the train list showed the
-  seat free 1.8 s later in one test and 8.7 s later in another. This delay is on the railway's side.
-- **The car lookup is cached for 3–5 s per train and date.** Right after the train list shows a seat, the car
-  lookup can still say there is none. A bot that trusts it misses the seat. So the bot remembers each train's
-  car numbers per class and date, and reserves on them directly at the moment of detection. The car lookup
-  runs in parallel as a fallback.
-- **Car numbers change between dates and routes.** The learned cars are therefore kept per date first.
-- **Rate limit.** HTTP 429 appeared around 47 requests per second, with no `Retry-After`. The bot stays far
-  below that: a token bucket of 10 per second with a 30 s pause after any 429.
-- **Real catches on a sold-out train (7 Nov 2026):**
+- A freed seat is invisible to everyone for a while. When a hold is cancelled, the train list showed the seat
+  free 1.8 s later in one test and 8.7 s later in another. This delay is on the railway's side.
+- The car lookup is cached for 3 to 5 s per train and date. Right after the train list shows a seat, the car
+  lookup can still say there is none, and a bot that trusts it misses the seat. So the bot remembers each
+  train's car numbers per class and date and reserves on them directly at the moment of detection, with the
+  car lookup running in parallel as a fallback.
+- Car numbers change between dates and routes, so the learned cars are kept per date first.
+- The rate limit is per endpoint, and a 429 comes without a `Retry-After` header. On 6 Nov it appeared at about
+  47 requests per second on `get-snapshot`. On 8 Nov the reserve endpoint answered 429 after a bot retried one
+  seat that could not be booked about 4 times a second for minutes; that lock lasted more than 6 minutes. The
+  bot now keeps all requests under 10 per second, leaves a seat that just failed alone until the train list
+  changes, and pauses an endpoint after a 429, longer each time it repeats (30 s, then up to 300 s).
+- Real catches on a sold-out train (7 Nov 2026):
 
   | Catch | Visible on the site → held |
   | --- | --- |
   | Seat that appeared | 3.3 s. The train's car of the day was not learned yet. |
   | Seat someone had just cancelled | 2.8 s |
 
-  After those runs, the car cache was keyed by date and the first reserve goes out on the warm connection.
+  Since then, the bot keys the car cache by date and sends the first reserve on the warm connection.
 
-**Rejected idea: reserving every seat blindly, every second.** Every reserve creates a real order in the
-railway's booking system: thousands of failed orders per hour per user. That invites an account ban, and it
-still cannot beat polling the train list, which is one cheap read that creates nothing.
+Reserving every seat blindly every second was rejected. Each reserve creates a real order in the railway's
+booking system, so that would mean thousands of failed orders per hour per user and an account ban, and it
+still could not beat polling the train list, which is one cheap read that creates nothing.
 
 ## Payment without a browser (Hamkorbank)
 
@@ -113,10 +116,12 @@ From held seats to a ready Pay link takes about 0.5 s.
 
 The mini app (`docs/`) is static.
 
-- **Into the mini app:** the bot passes the current settings in the URL fragment when it opens the mini app.
-- **Back to the bot:** the mini app returns changes with `Telegram.WebApp.sendData` (at most 4096 bytes),
-  from a reply-keyboard button.
-- **Station list:** the railway site sends no CORS headers, so the mini app ships its own list in
-  `stations.json`, built with `tools/build_stations.py`.
-- **Password:** the mini app encrypts the railway password with the PC's RSA public key (RSA-OAEP, SHA-256),
-  so it never crosses Telegram in plain text.
+- The bot puts the current settings in the URL fragment of the keyboard button that opens the mini app.
+  Telegram updates that link only when a bot message carries the keyboard, so every plain bot message carries
+  a fresh one; otherwise a change made in the PC app would not show in the mini app.
+- The mini app sends changes back with `Telegram.WebApp.sendData` (at most 4096 bytes), which works only from
+  a reply-keyboard button.
+- The railway site sends no CORS headers, so the mini app ships its own station list in `stations.json`,
+  built with `tools/build_stations.py`.
+- The mini app encrypts the railway password with the PC's RSA public key (RSA-OAEP, SHA-256), so it never
+  crosses Telegram in plain text.
