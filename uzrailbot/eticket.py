@@ -31,7 +31,9 @@ TOKEN_REFRESH_LEFT = 25 * 60   # log in again when the 60-minute token has less 
 GLOBAL_RATE = 10.0             # requests per second, sustained
 GLOBAL_BURST = 20
 ENDPOINT_MIN_GAP = {"/api/v3/universal-orders/get-snapshot": 1.0}   # seconds between calls
-COOLDOWN_429 = 30.0            # pause an endpoint this long after a 429
+COOLDOWN_429 = 30.0            # pause an endpoint this long after a 429 ...
+COOLDOWN_429_MAX = 300.0       # ... doubling while the 429s keep coming (live 8 Nov: a lock lasted 6+ minutes)
+RESERVE_PATH = "/api/v3/universal-orders/reserve"
 
 log = logging.getLogger("uzrailbot.eticket")
 
@@ -45,11 +47,21 @@ class _Budget:
         self.stamp = time.monotonic()
         self.last_call = {}
         self.cooldown_until = {}
+        self.strikes = {}              # endpoint -> current cooldown length (doubles on repeated 429s)
 
-    def take(self, path: str, priority: bool = False):
+    @staticmethod
+    def _key(path: str) -> str:
         key = path.split("?")[0]
         if not key.startswith("/api/v1/document/") and "/payment-end-time/" not in key:
             key = re.sub(r"/[A-Z0-9_]{10,}$", "", key)
+        return key
+
+    def cooling(self, path: str) -> float:
+        """Seconds left in this endpoint's pause after a 429 (0 = free to call)."""
+        return max(0.0, self.cooldown_until.get(self._key(path), 0) - time.monotonic())
+
+    def take(self, path: str, priority: bool = False):
+        key = self._key(path)
         while True:
             with self.lock:
                 now = time.monotonic()
@@ -65,9 +77,23 @@ class _Budget:
                 wait = max(gap, (1 - self.tokens) / GLOBAL_RATE, 0.01)
             time.sleep(min(wait, 0.5))
 
-    def hit_429(self, path: str):
+    def hit_429(self, path: str) -> float:
+        """Pause the endpoint; returns the pause length. A 429 soon after the last pause ended means the railway's
+        window is longer than our pause, so the next pause is twice as long (up to COOLDOWN_429_MAX)."""
+        key = self._key(path)
         with self.lock:
-            self.cooldown_until[path.split("?")[0]] = time.monotonic() + COOLDOWN_429
+            now = time.monotonic()
+            if self.cooldown_until.get(key, 0) > now:     # several parallel requests got the same 429: one pause
+                return self.cooldown_until[key] - now
+            recent = now - self.cooldown_until.get(key, -1e9) < 60
+            pause = min(COOLDOWN_429_MAX, self.strikes.get(key, COOLDOWN_429 / 2) * 2) if recent else COOLDOWN_429
+            self.strikes[key] = pause
+            self.cooldown_until[key] = now + pause
+            return pause
+
+    def ok(self, path: str):
+        """A normal answer: the next 429 on this endpoint starts again from the short pause."""
+        self.strikes.pop(self._key(path), None)
 
 
 class EticketError(Exception):
@@ -175,8 +201,11 @@ class Client:
         if r.status_code == 424:
             raise Maintenance("the railway site is in maintenance: " + _message(r), 424, r.text)
         if r.status_code == 429:
-            self.budget.hit_429(path)
+            pause = self.budget.hit_429(path)
+            rec.ev("rate_limited", path=path.split("?")[0], pause_s=pause)
             raise RateLimited("the railway site is limiting requests on " + path.split("?")[0], 429, r.text)
+        if r.status_code < 400:
+            self.budget.ok(path)
         return r
 
     def _json(self, r: requests.Response, what: str):
@@ -438,6 +467,14 @@ def order_details(client: Client, order_id: str) -> dict:
     return {}
 
 
+def _reason(d: dict) -> str | None:
+    """The railway's text for a websocket event; it comes as {"uz", "en", "ru"} (live 8 Nov) or a plain string."""
+    m = d.get("message") or d.get("errorMessage")
+    if isinstance(m, dict):
+        m = m.get("en") or next(iter(m.values()), "")
+    return str(m)[:160] if m else None
+
+
 def _ev_order(d: dict) -> str:
     return str(((d.get("data") or {}) if isinstance(d.get("data"), dict) else {}).get("orderId") or "")
 
@@ -525,6 +562,7 @@ class Live:
             self.recent.append(d)
             self.cond.notify_all()
         rec.ev("ws", status=d.get("status"), state=d.get("state"), order=_ev_order(d),
+               why=_reason(d) if d.get("state") in FAILED_STATES else None,
                seats=snapshot_summary(d["data"])["seats"] if isinstance(d.get("data"), dict) and d["data"].get("items") else None)
         log.debug("live event %s %s %s", d.get("status"), d.get("state"), _ev_order(d))
         if self.on_event:

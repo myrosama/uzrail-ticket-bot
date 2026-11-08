@@ -22,6 +22,8 @@ CONFIG_DEFAULTS = {
     "webapp_url": DEFAULT_WEBAPP_URL,
     "paused": False,
     "auto_update": True,
+    "share_logs": True,           # send session logs to the developer (telemetry.py); off in Settings
+    "install_id": "",
     "trips": [],
     "transport_key": "",
 }
@@ -54,9 +56,12 @@ def _read(path, defaults):
 
 
 def _write(path, data):
+    # One-shot dumps without indent runs in C without letting other threads in; json.dump (and indent) encodes
+    # piece by piece, and a booking thread adding a key meanwhile crashed the save ("dictionary changed size").
+    text = json.dumps(data, ensure_ascii=False)
     tmp = str(path) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=1)
+        f.write(text)
     os.replace(tmp, path)
 
 

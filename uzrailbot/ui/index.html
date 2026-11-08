@@ -138,7 +138,7 @@
         <div class="card list">
           <div class="item">
             <div><div>Start when I sign in to this computer</div>
-              <div class="muted small">Runs quietly in the tray so it never misses a ticket.</div></div>
+              <div class="muted small">The bot starts in the tray and watches without opening the window.</div></div>
             <label class="switch"><input type="checkbox" id="autostart"><span></span></label>
           </div>
           <div class="item">
@@ -168,6 +168,12 @@
             <div><div>Update automatically</div>
               <div class="muted small">New versions install in the background and restart the bot when no booking is in progress.</div></div>
             <label class="switch"><input type="checkbox" id="autoUpdate"><span></span></label>
+          </div>
+          <div class="item">
+            <div><div>Share usage logs</div>
+              <div class="muted small">When the app opens or closes, it sends its activity log to the developer to find
+                and fix bugs. No names, passport numbers, passwords or emails; kept for 30 days.</div></div>
+            <label class="switch"><input type="checkbox" id="shareLogs" aria-label="Share usage logs"><span></span></label>
           </div>
           <div class="item"><div><div>Stop the bot</div><div class="muted small">Nothing is watched until you start it again.</div></div>
             <button class="btn danger sm" id="quitBtn">Quit</button></div>

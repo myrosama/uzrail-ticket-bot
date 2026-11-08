@@ -8,9 +8,10 @@ import json
 import logging
 import logging.handlers
 import sys
+import threading
 import time
 
-from . import __version__, eticket, paths
+from . import __version__, eticket, paths, telemetry
 from .recorder import rec
 from .store import Store
 from .telegram import TgApi, TgError
@@ -117,6 +118,8 @@ def run():
     def stop_all():
         engine.stop()
         bot.stop()
+        telemetry.upload(store, closing=True, timeout=3)
+    threading.Thread(target=telemetry.upload, args=(store,), daemon=True).start()   # earlier sessions
     from .updater import Updater
     Updater(store, lambda: not store.state.get("holds") and not engine.booking and not engine.moving_pax,
             stop_all).start()
@@ -134,8 +137,7 @@ def run():
     except KeyboardInterrupt:
         logging.info("stopping")
         rec.ev("stop")
-        engine.stop()
-        bot.stop()
+        stop_all()
 
 
 # ---------------------------------------------------------------- console test mode (no Telegram)

@@ -212,8 +212,8 @@
               || '<option value="">nobody else can take it (everyone has a seat or a ticket)</option>'}</select></label>
           </div>
           <p class="muted small">The reservation is cancelled and the same seat is re-booked for the new passenger at
-            once. That almost always works (others see a freed seat only 2-9 s later); if it doesn't come back, another
-            seat in the car or class is taken. The new passenger also becomes #1 in the trip.
+            once. This usually works, because others see a freed seat only 2 to 9 s later. If it doesn't come back,
+            another seat in the car or class is taken. In the trip, the new passenger takes the old one's place.
             ${(h.passengers || []).length > 1 ? "<b>This reservation has several passengers: all its seats are released and re-booked together, so seat numbers may change.</b>" : ""}</p>
           <div class="row-btns"><button type="button" class="btn ghost sm" data-xfer-close>Back</button>
             <button type="submit" class="btn primary sm">Move the seat</button></div>
@@ -459,6 +459,7 @@
     btn.textContent = u.state === "available" ? "Update now" : "Check now";
     btn.disabled = ["checking", "downloading", "installing", "ready", "restarting", "dev"].includes(u.state);
     $("#autoUpdate").checked = S.autoUpdate;
+    $("#shareLogs").checked = S.shareLogs !== false;
   }
   $("#updBtn").addEventListener("click", async () => {
     await api("/api/update", { install: (S.update || {}).state === "available" });
@@ -467,6 +468,10 @@
   $("#autoUpdate").addEventListener("change", async (e) => {
     const r = await api("/api/autoupdate", { on: e.target.checked });
     toast(r.on ? "Updates install automatically" : "You'll be told about updates; install them from here");
+  });
+  $("#shareLogs").addEventListener("change", async (e) => {
+    const r = await api("/api/sharelogs", { on: e.target.checked });
+    toast(r.on ? "Usage logs are shared with the developer" : "Usage logs stay on this PC");
   });
 
   /* ---------------------------------------------------------------- settings */

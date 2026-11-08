@@ -157,6 +157,13 @@ class Bot:
                 kind, text, markup, extra, doc, fname = self.out.get(timeout=0.5)
             except queue.Empty:
                 continue
+            if kind == "msg" and markup is None:
+                # The Mini App reads its trips/passengers from the keyboard link, which Telegram only updates when a
+                # message carries it: give every plain message the fresh keyboard so the Mini App never goes stale.
+                try:
+                    markup = self.main_kb()
+                except Exception:
+                    log.exception("building the keyboard")
             for attempt in range(60):
                 try:
                     if kind == "msg":
@@ -286,8 +293,8 @@ class Bot:
             rec.ev("trip_saved", trip=t["id"], mode=t["mode"], dates=t["dates"], classes=t["classes"],
                    max_price=t["maxPrice"], passengers=len(t["passengers"]), speed=t["speed"],
                    route=[t["from"]["code"], t["to"]["code"]])
+            # no train picker here: the Mini App has its own (the chat wizard /new still offers it)
             self.send("✅ <b>Saved. Watching now.</b>\n\n" + self._summary(t), self.main_kb())
-            threading.Thread(target=self.offer_trains, args=(t["id"],), daemon=True).start()
             return
         if act == "toggle":
             self.store.set_trip_active(str(d.get("id")), bool(d.get("active")))
@@ -492,7 +499,7 @@ class Bot:
 
     def _summary(self, t):
         cls = ", ".join(label(c) for c in t["classes"]) or "any class"
-        price = f"up to {fmt_sum(t['maxPrice'])} so'm" if t["maxPrice"] else "any price"
+        price = f"up to {fmt_sum(t['maxPrice'])} so'm per ticket" if t["maxPrice"] else "any price"
         mode = "🛒 auto-buy" if t["mode"] == "buy" else "🔔 notify"
         names = {p["id"]: p["name"] for p in self.engine.passenger_list()}
         pax = ", ".join(H(names.get(p, p)) for p in t.get("passengers", [])) if t["mode"] == "buy" else ""
@@ -705,7 +712,7 @@ class Bot:
             lines.append(f"\n🚆 <b>{H(t['from']['name'].title())} → {H(t['to']['name'].title())}</b>{state}")
             lines.append("📅 " + (", ".join(fmt_day(d) for d in future) or "no dates left"))
             cls = ", ".join(short_label(c) for c in t["classes"]) or "any class"
-            price = f"up to {fmt_sum(t['maxPrice'])}" if t["maxPrice"] else "any price"
+            price = f"up to {fmt_sum(t['maxPrice'])} per ticket" if t["maxPrice"] else "any price"
             trains = "only " + ", ".join(H(n) for n in t["trains"]) if t.get("trains") else "all trains"
             lines.append(f"🎫 {cls} · {price} · {trains} · {'auto-buy' if t['mode'] == 'buy' else 'notify only'}")
             if t["mode"] == "buy":
@@ -839,7 +846,7 @@ class Bot:
             rows.append([{"text": f"💳 Pay {fmt_sum(h['total'])} so'm", "url": h["pay_url"]}])
         else:
             rows.append([{"text": "🔁 Get a payment link", "callback_data": f"paylink:{h['order']}"}])
-        rows.append([{"text": "🔄 Transfer to another passenger", "callback_data": f"xfer:{h['order']}"},
+        rows.append([{"text": "🔄 Transfer", "callback_data": f"xfer:{h['order']}"},
                      {"text": "❌ Cancel", "callback_data": f"cancel:{h['order']}"}])
         return {"inline_keyboard": rows}
 
@@ -875,10 +882,10 @@ class Bot:
             return self.edit(mid, (
                 f"🔄 Move seat <b>{H(str(seat_of.get(frm, '?')))}</b> (train {H(h['train'])}, car {H(h['car'])}) from "
                 f"<b>{H(names.get(frm, '?'))}</b> to <b>{H(names.get(to, '?'))}</b>?\n\n"
-                "I cancel this reservation and at once re-book the same seat for the new passenger. That almost always "
-                "works: everyone else sees a freed seat only 2-9 s later. If the same seat doesn't come back I take "
-                "another seat in the car or class; if nothing is left, I search again, "
-                f"{H(names.get(to, 'the new passenger'))} first."
+                "I cancel this reservation and at once re-book the same seat for the new passenger. This usually works, "
+                "because everyone else sees a freed seat only 2 to 9 s later. If the same seat doesn't come back I take "
+                f"another seat in the car or class. In the trip, {H(names.get(to, 'the new passenger'))} takes "
+                f"{H(names.get(frm, 'their'))}'s place."
                 + (f"\n\n⚠️ This reservation has {len(h['passengers'])} passengers: all its seats are released and "
                    "re-booked together, so seat numbers may change." if len(h["passengers"]) > 1 else "")),
                 {"inline_keyboard": [[{"text": "✅ Move the seat", "callback_data": f"xgo:{oid}:{frm}:{to}"}], back]})
@@ -888,9 +895,21 @@ class Bot:
         def go():
             ok, msg = self.engine.transfer_hold(oid, frm, to)
             rec.ev("user_transfer", order=oid, ok=ok, source="telegram")
-            self.edit(mid, (f"🔄 Seat moved to <b>{H(names.get(to, '?'))}</b>. " + (f"{H(msg)} " if msg else "")
-                            + "The new reservation is below: pay there.") if ok else f"⚠️ {H(msg)}")
+            self.transfer_done(h, names.get(to, "?"), ok, msg, also_edit=mid)
         threading.Thread(target=go, daemon=True).start()
+
+    def transfer_done(self, h, to_name, ok, msg, also_edit=None):
+        """After a transfer from Telegram or the PC app: update the old Pay message and say what happened."""
+        still = self.store.state["holds"].get(h["order"])      # the transfer stopped before releasing the seat
+        text = (f"🔄 Seat moved to <b>{H(to_name)}</b>. " + (f"{H(msg)} " if msg else "")
+                + "The new reservation is below: pay there.") if ok else f"⚠️ The seat didn't go to <b>{H(to_name)}</b>. {H(msg)}"
+        for mid in {h.get("msg_id"), also_edit} - {None}:
+            if still:
+                self.edit(mid, self._pay_text(still), self._hold_kb(still))
+            else:
+                self.edit(mid, text)
+        if not ok:
+            self.send(text)          # a new message, so it is seen even when the transfer started in the PC app
 
     def _hold_text(self, h, head="✅ <b>Seats reserved!</b>"):
         seats = []

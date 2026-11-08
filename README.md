@@ -33,21 +33,19 @@ Then it sends you a **Pay** button in Telegram.
 
 ## Highlights
 
-- ⚡ **Fast**: usually about 2 s from a seat appearing to it being held in your name (measured on real
-  sold-out trains).
-- 🚆 **Every route and class**: plaskart, kupe, SV, lux and sitting. Pick a route and you see its trains, times
-  and classes.
-- 👥 **Up to 4 passengers** in priority order: if fewer seats appear, the first passengers get them.
-- 💳 **You pay, it books**: pay on Hamkorbank's own page; the ticket PDF arrives in the chat.
-- 🔄 **Transfer**: give a held seat to another of your saved passengers in a couple of seconds.
-- 📊 **See everything**: per-passenger status in Telegram, a live board of free seats, an activity feed and a
-  live console.
-- 🔒 **Private**: runs on your computer. Your railway password is encrypted on your phone before it leaves it.
-- ⬆️ **Updates itself**: new versions install in the background, never in the middle of a booking.
+- A seat is usually held in your name about 2 s after it appears (measured on real sold-out trains).
+- Every route and class: plaskart, kupe, SV, lux and sitting. Pick a route to see its trains, times and classes.
+- Up to 4 passengers in priority order. If fewer seats appear, the first passengers get them.
+- You pay on Hamkorbank's own page, and the ticket PDF arrives in the chat.
+- A held seat can go to another of your saved passengers in a couple of seconds.
+- Telegram shows each passenger's status and a live board of free seats; the desktop app adds an activity feed
+  and a live console.
+- It runs on your computer. Your railway password is encrypted on your phone before it leaves it.
+- New versions install in the background, never in the middle of a booking.
 
 ## Install
 
-One line. It gets Python if needed, installs the app, adds it to your apps and opens it.
+One command gets Python if needed, installs the app, adds it to your apps and opens it.
 
 **Windows**: open PowerShell and paste:
 
@@ -73,15 +71,15 @@ talk to it, quit, uninstall.
 
 ## Setup in 2 minutes
 
-1. **Create a Telegram bot.** Open [@BotFather](https://t.me/BotFather), send `/newbot` and copy the token.
-2. **Paste the token** into the UzRail Bot window. Then open your new bot on your phone and press **Start**.
+1. Create a Telegram bot: open [@BotFather](https://t.me/BotFather), send `/newbot` and copy the token.
+2. Paste the token into the UzRail Bot window. Then open your new bot on your phone and press **Start**.
    The window shows your name; confirm it. Only your Telegram account can control the bot.
-3. **In Telegram, tap 🚆 Trips & settings.** A small app opens inside Telegram:
+3. In Telegram, tap **🚆 Trips & settings**. A small app opens inside Telegram:
    - connect your eticket.uzrailpass.uz login;
    - add a trip: route, dates, the trains and classes you accept, a maximum price and up to 4 passengers in
      priority order (from your saved passengers on the railway site);
    - choose **Auto-buy** or **Notify only**.
-4. **Leave the computer on.** On Windows and macOS the bot keeps it from sleeping while it watches.
+4. Leave the computer on. On Windows and macOS the bot keeps it from sleeping while it watches.
 
 <p align="center">
   <img src="docs/screenshots/miniapp-home.png" width="250" alt="Your trips in the Telegram mini app, dark theme">
@@ -110,10 +108,10 @@ classes those trains have.
 If you don't pay in time, the seats go back on sale. Those passengers go back on the search list, and the bot
 catches the seat again if it reappears.
 
-**🔄 Transfer to another passenger** gives a held seat to anyone among your saved passengers, whether lower in
-the trip or not on it at all. The bot cancels the reservation and re-books the same seat for them at once.
-Everyone else sees a freed seat only 2–9 s later. On the live site the seat was held again about 2 s after
-the release.
+**🔄 Transfer** gives a held seat to anyone among your saved passengers, whether lower in the trip or not on it
+at all. The bot cancels the reservation and re-books the same seat for them at once, while everyone else sees
+the freed seat only 2 to 9 s later. On the live site the seat was held again about 2 s after the release. In
+the trip, the new passenger takes the old one's place.
 
 **📊 Status** lists every passenger:
 - held: where, when, and how long is left to pay;
@@ -132,35 +130,32 @@ flowchart TB
 
 There is no browser automation. The bot talks to the railway's own API, the same one the website uses.
 
-- **Booking:** the moment a seat shows up, it sends one reservation to the train's most likely car on an
-  already-open connection, and tries the train's other cars in parallel.
-- **Confirmation:** the railway confirms over its live channel.
-- **Duplicates:** the bot keeps the first hold and releases any extras.
+The moment a seat shows up, the bot sends one reservation to the train's most likely car on an already-open
+connection and tries the train's other cars in parallel. The railway confirms over its live channel; the bot
+keeps the first hold and releases any extras.
 
 | Step | Time |
 | --- | --- |
 | Noticing a new seat | up to ~0.8 s (the check interval) |
 | Sending the reservation | under 0.1 s |
-| The railway confirming the hold | 1–2 s |
-| **Real catches, seat visible → held** | **1.1–3.3 s, usually about 2 s** |
+| The railway confirming the hold | 1 to 2 s |
+| **Real catches, seat visible → held** | **1.1 to 3.3 s, usually about 2 s** |
 
-The bot stays far below the site's rate limits and backs off if asked to slow down. The research behind all
-of this, with measurements, is in [docs/RESEARCH.md](docs/RESEARCH.md).
+When the site answers "too many requests" (HTTP 429), the bot pauses that kind of request, and pauses longer
+each time it happens again. The research behind all of this, with measurements, is in
+[docs/RESEARCH.md](docs/RESEARCH.md).
 
 ## The desktop app
 
-The window shows:
-- **Status:** what's happening, held seats with Pay / Transfer / Cancel, and a live board of free seats per
-  train;
-- **Trips:** each passenger: searching, seat held or ticket bought;
-- **Activity:** with filters;
-- **Settings.**
+The window has four pages. **Status** shows what the bot is doing, held seats with Pay, Transfer and Cancel,
+and a live board of free seats per train. **Trips** shows each passenger as searching, seat held or ticket
+bought. **Activity** is the event feed, with filters. **Settings** has the account, updates and usage logs.
+Whatever you do in the window (pause, transfer, cancel, change a trip) is also posted in Telegram.
 
 On Windows and Linux the tray icon is green while watching, amber when seats are held, grey when paused and red
 on a problem. On a Mac the menu-bar icon keeps one colour. Closing the window keeps the bot running.
 
-**Live console** opens a terminal window that shows everything as it happens: every check, every request,
-every booking step.
+**Live console** opens a terminal window that prints every check, request and booking step as it happens.
 
 <p align="center"><img src="docs/screenshots/app-activity.png" width="720" alt="The Activity page with filters for seats and bookings and for problems"></p>
 
@@ -208,8 +203,8 @@ Yes. The bot can only watch while it runs. It keeps Windows and macOS awake whil
 <details>
 <summary><b>Can this get my railway account blocked?</b></summary>
 
-It is unofficial, so there's no guarantee. It behaves gently: about one check every 0.8 s per route and date,
-far below the site's limits, and it backs off when the site asks. Use it at your own risk.
+It is unofficial, so there's no guarantee. It checks about once every 0.8 s per route and date and pauses
+when the site asks it to slow down. Use it at your own risk.
 </details>
 
 <details>
@@ -217,7 +212,7 @@ far below the site's limits, and it backs off when the site asks. Use it at your
 
 The Telegram mini app encrypts your railway password on your phone with your computer's public key, so
 Telegram only ever carries ciphertext. On your computer it is stored encrypted: DPAPI on Windows, a private
-key file on macOS and Linux. Nothing is sent anywhere else.
+key file on macOS and Linux. The password is never sent anywhere else.
 </details>
 
 <details>
@@ -252,13 +247,20 @@ Your settings folder is kept; delete it to remove everything.
 
 ## Privacy
 
-Everything stays on your computer:
+Your settings, railway login, trips and logs live on your computer:
 - Windows: `%LOCALAPPDATA%\UzRailBot`
 - macOS: `~/Library/Application Support/UzRailBot`
 - Linux: `~/.local/share/UzRailBot`
 
 The Telegram mini app is a static page (`docs/`, on GitHub Pages) with no server behind it. The desktop window
 talks to the bot only over `127.0.0.1`, with a random key per run.
+
+**Usage logs.** When the app opens or closes, it sends its activity log to the developer, so bugs can be found and
+fixed from real runs. That log has every check of the railway site, every booking step and every error. It has no
+names, passport numbers, passwords or emails: the bot never writes them, and links, emails, phone numbers and
+passport-like numbers are blanked out before sending. A random id groups one PC's logs. The server
+(`tools/logs-worker`) doesn't store IP addresses and deletes logs after 30 days. It's on by default; turn it off in
+the desktop app under **Settings → Share usage logs**, or set `"share_logs": false` in `config.json`.
 
 <details>
 <summary><b>Development</b></summary>

@@ -3,6 +3,7 @@ browser) and a tray icon. The window talks to a local HTTP API on 127.0.0.1 guar
 from __future__ import annotations
 
 import collections
+import html
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import requests
 
-from . import __version__, autostart, paths
+from . import __version__, autostart, paths, telemetry
 from .recorder import rec
 from .store import Store
 from .telegram import TgApi, TgError
@@ -81,6 +82,7 @@ class App:
         was = os.environ.get("UZRAILBOT_JUST_UPDATED")
         self.bot.send(f"🔄 Updated to v{__version__} (was v{was}). Watching again." if was else
                       f"🟢 UzRail Bot v{__version__} started on your PC.", self.bot.main_kb())
+        threading.Thread(target=telemetry.upload, args=(self.store,), daemon=True).start()   # earlier sessions
         log.info("services started")
 
     def _idle(self) -> bool:
@@ -104,6 +106,8 @@ class App:
             self.engine.stop()
         if self.bot:
             self.bot.stop()
+        if self.engine:                  # quit or update-restart: send this session (short timeout, never blocks long)
+            telemetry.upload(self.store, closing=True, timeout=3)
 
     def state(self) -> dict:
         now = time.time()
@@ -128,6 +132,7 @@ class App:
             "autostart": autostart.is_enabled(), "dataDir": str(paths.app_dir()),
             "telegramOk": bool(self.bot.healthy) if self.bot else None,
             "update": self.updater.status, "autoUpdate": bool(self.store.cfg.get("auto_update", True)),
+            "shareLogs": telemetry.enabled(self.store),
             "board": s.get("board", []), "stats": s.get("stats", {}), "offlineSince": s.get("offline_since") or 0,
             "pax": {p["id"]: p["name"] for p in self.engine.passenger_list()} if self.engine else {},
             "done": self.store.state.get("done", {}),
@@ -181,6 +186,15 @@ class App:
         return {"ok": True}
 
     # ---------------------------------------------------------------- local API
+    def _tell(self, text: str):
+        """Repeat an action done in the PC app in Telegram (this also refreshes the Mini App's data)."""
+        if self.bot:
+            self.bot.send(html.escape(text, quote=False))
+
+    @staticmethod
+    def _route(t: dict) -> str:
+        return f"{t['from']['name'].title()} → {t['to']['name'].title()}"
+
     def handle(self, method: str, path: str, body: dict):
         if path == "/api/state":
             return self.state()
@@ -197,15 +211,23 @@ class App:
             self.store.cfg["paused"] = bool(body.get("paused"))
             self.store.save()
             rec.ev("user_pause" if self.store.cfg["paused"] else "user_resume", source="app")
+            self._tell("⏸ Paused from the PC app." if self.store.cfg["paused"] else "▶️ Watching again (resumed from the PC app).")
             return {"ok": True}
         if path == "/api/trip":
+            t = self.store.trip(str(body.get("id")))
             ok = self.store.set_trip_active(str(body.get("id")), bool(body.get("active")))
+            if ok and t:
+                self._tell(f"{'▶️ Watching' if body.get('active') else '⏸ Paused'} the trip {self._route(t)} (from the PC app).")
             return {"ok": ok}
         if path == "/api/transfer":
             if not self.engine:
                 return {"ok": False, "error": "The bot isn't running yet."}
+            h = dict(self.store.state["holds"].get(str(body.get("order"))) or {})
             ok, msg = self.engine.transfer_hold(str(body.get("order")), str(body.get("from")), str(body.get("to")))
             rec.ev("user_transfer", order=str(body.get("order")), ok=ok, source="app")
+            if h and self.bot:
+                to = next((p["name"] for p in self.engine.passenger_list() if p["id"] == str(body.get("to"))), "?")
+                self.bot.transfer_done(h, to, ok, msg)
             return {"ok": ok, "error": msg}
         if path == "/api/passengers":
             if self.engine:
@@ -216,11 +238,20 @@ class App:
             ok = open_window()
             return {"ok": ok, "error": "" if ok else "No terminal app found. Run: uzrailbot live"}
         if path == "/api/trip/delete":
+            t = self.store.trip(str(body.get("id")))
             ok = self.store.delete_trip(str(body.get("id")))
             rec.ev("trip_deleted", trip=str(body.get("id")), source="app")
+            if ok and t:
+                self._tell(f"🗑 Deleted the trip {self._route(t)} (from the PC app).")
             return {"ok": ok}
         if path == "/api/cancel":
+            h = dict(self.store.state["holds"].get(str(body.get("order"))) or {})
             ok = self.engine.cancel_hold(str(body.get("order"))) if self.engine else False
+            if h and self.bot:
+                if h.get("msg_id"):      # close the Pay message, so its buttons don't point at a dead reservation
+                    self.bot.edit(h["msg_id"], "❌ Cancelled in the PC app.")
+                self._tell(f"❌ You cancelled the reservation on train {h.get('train')} in the PC app. The seats went back "
+                           "on sale, and I paused that trip so it doesn't grab them again.")
             return {"ok": ok}
         if path == "/api/autostart":
             autostart.set_enabled(bool(body.get("on")))
@@ -245,6 +276,11 @@ class App:
             self.store.cfg["auto_update"] = bool(body.get("on"))
             self.store.save()
             return {"ok": True, "on": self.store.cfg["auto_update"]}
+        if path == "/api/sharelogs":
+            self.store.cfg["share_logs"] = bool(body.get("on"))
+            self.store.save()
+            rec.ev("share_logs", on=self.store.cfg["share_logs"])
+            return {"ok": True, "on": self.store.cfg["share_logs"]}
         if path == "/api/show":
             self.show()
             return {"ok": True}
@@ -368,6 +404,7 @@ class App:
         def toggle_pause(_icon, _item):
             self.store.cfg["paused"] = not self.store.cfg.get("paused")
             self.store.save()
+            self._tell("⏸ Paused from the tray icon." if self.store.cfg["paused"] else "▶️ Watching again (resumed from the tray icon).")
 
         menu = pystray.Menu(
             pystray.MenuItem("Open UzRail Bot", lambda *_: self.show(), default=True),

@@ -112,6 +112,9 @@ class Engine:
         self.last_notice = {}          # (trip, date) -> time of last "seats found" message
         self.learn_at = {}             # (train, cls) -> last learn attempt
         self.moving_pax = set()        # passengers in the middle of a transfer: never book them elsewhere
+        self.booking_pax = set()       # passengers a booking is running for right now (two trips can share people)
+        self.bad_seats = {}            # (date, train, car, seat) -> time a reserve for it failed
+        self.stuck = {}                # (date, train, cls) -> (time, free): the list shows seats we just failed on
         self.hold_mono = {}            # order id -> monotonic deadline (immune to PC clock changes)
         self.ours = set()              # orders we cancel/replace ourselves (ignore their ORDER_FAILED)
         self.status = {"state": "starting", "detail": "", "last_check": 0.0, "checks": 0,
@@ -150,11 +153,13 @@ class Engine:
             rec.ev("state", state=state, detail=detail)
         self.status.update(state=state, detail=detail)
 
-    def _alert_once(self, key: str, text: str, every: float = 1800):
+    def _alert_once(self, key: str, text: str, every: float = 1800) -> bool:
         now = time.time()
         if now - self._alerted.get(key, 0) > every:
             self._alerted[key] = now
             self.ui.problem(text)
+            return True
+        return False
 
     def account_changed(self):
         with self.lock:
@@ -234,6 +239,10 @@ class Engine:
     # ---------------------------------------------------------------- crash recovery
     def _recover(self):
         st = self.store.state
+        today = today_tashkent()
+        cars = st.get("cars", {})
+        for k in [k for k in cars if k.count("|") == 2 and k.rsplit("|", 1)[1] < today]:
+            del cars[k]                  # cars learned for dates that are over: the file would only keep growing
         for oid in list(st.get("pending", [])):
             if oid not in st["holds"]:
                 try:
@@ -249,6 +258,8 @@ class Engine:
             except EticketError:
                 left = None
             if not left or left <= 0:
+                if self._paid_meanwhile(oid, h):     # paid while the app was closed
+                    continue
                 st["holds"].pop(oid, None)
                 rec.ev("recover_drop_hold", order=oid)
             else:
@@ -399,6 +410,12 @@ class Engine:
                 if (fresh or (first and hits)) and time.time() - self.last_notice.get((trip["id"], date), 0) > 20:
                     self.last_notice[(trip["id"], date)] = time.time()
                     self.ui.seats_found(trip, date, hits)
+            elif hits and self.client.budget.cooling(eticket.RESERVE_PATH):
+                # Booking now would only be refused by our own pause (and used to log a false "missed"): keep
+                # watching, book on the first check after the pause.
+                if self._alert_once("reserve-429", "The railway site is limiting bookings from this account right "
+                                    "now. I keep watching and book again the moment it lets me.", 600):
+                    rec.ev("booking_paused", seconds=round(self.client.budget.cooling(eticket.RESERVE_PATH)))
             elif any(self._effective_free(date, h) > 0 for h in hits):
                 hits = [dict(h, free=self._effective_free(date, h)) for h in hits if self._effective_free(date, h) > 0]
                 with self.lock:
@@ -423,6 +440,9 @@ class Engine:
         we just held as free for 2-9 s; booking it again only fails (and used to send a 'missed')."""
         now = time.time()
         k = (date, hit["number"], hit["cls"])
+        s = self.stuck.get(k)
+        if s and now - s[0] < 60 and s[1] == hit["free"]:
+            return 0      # every seat the list shows here just failed to book: wait until the list changes
         taken = [(t, n) for t, n in self.recent_held.get(k, []) if now - t < 30]
         self.recent_held[k] = taken
         return hit["free"] - sum(n for _, n in taken)
@@ -493,7 +513,7 @@ class Engine:
         """Passengers of this trip still without a seat: not paid, not held (on this trip, or on another trip
         for the same route and date), and not in the middle of a transfer."""
         done = set(self.store.done_passengers(trip["id"]))
-        held = set(self.moving_pax)
+        held = self.moving_pax | self.booking_pax
         route = (trip["from"]["code"], trip["to"]["code"])
         for h in self.store.state["holds"].values():
             if h["trip"] == trip["id"]:
@@ -505,11 +525,14 @@ class Engine:
         return [p for p in trip["passengers"] if p not in done and p not in held]
 
     def _book(self, trip_id, date, hits, fresh):
+        remaining = []
         try:
             trip = self._trip_live(trip_id)
             if not trip:
                 return
-            remaining = self._remaining(trip)
+            with self.lock:              # claim the passengers: another trip with the same people must skip them
+                remaining = self._remaining(trip)
+                self.booking_pax.update(remaining)
             if not self.friends:
                 self.refresh_friends()
             people = [self.friends[p] for p in remaining if p in self.friends]
@@ -531,6 +554,7 @@ class Engine:
         finally:
             with self.lock:
                 self.booking.discard(trip_id)
+                self.booking_pax.difference_update(remaining)
 
     def _book_hit(self, trip, date, hit, people, fresh) -> set:
         """Try to hold seats for `people` on one train/class. Returns the friendIds held."""
@@ -538,6 +562,7 @@ class Engine:
         number, cls = hit["number"], hit["cls"]
         party = people[:4]
         held = set()
+        sent = limited = False
         for attempt in range(ATTEMPTS_PER_DETECTION):
             if not self._trip_live(trip["id"]):
                 break
@@ -561,20 +586,42 @@ class Engine:
             groups = cars_future.result() if cars_future is not None else []
             if groups:
                 self._learn(number, groups, date)
-            plan = self._plan(groups, cls, trip, party)
+            now = time.time()
+            skip = {(c, s) for (d, n, c, s), at in list(self.bad_seats.items()) if d == date and n == number and now - at < 60}
+            plan = self._plan(groups, cls, trip, party, skip)
             rec.ev("plan", train=number, cls=cls, attempt=attempt + 1,
                    car=plan[0]["number"] if plan else None, seats=plan[1] if plan else None,
                    ms=round((time.time() - t0) * 1000), fanout_orders=len(orders))
+            aimed = None                     # (order id, car number, seats) of the reserve aimed at exact seats
             if plan and plan[0]["number"] not in {c["number"] for c, _, _ in orders.values()}:
                 car, seats, who = plan
                 oid = self._reserve(trip, hit, car, f"{min(seats)}-{max(seats)}", who)
                 if oid:
                     orders[oid] = (car, who, "cars")
+                    aimed = (oid, car["number"], seats)
+            if self.client.budget.cooling(eticket.RESERVE_PATH):
+                limited = True               # refused by the railway's rate limit, not taken by someone else
             if not orders:
+                if limited:
+                    rec.ev("booking_paused", train=number, cls=cls, seconds=round(self.client.budget.cooling(eticket.RESERVE_PATH)))
+                    break
+                if groups:
+                    # The car lookup shows seats, but none we can use (they just failed, or don't fit the party or
+                    # the price): retrying only repeats the same failed booking. Live 8 Nov: retried ~4 times a second
+                    # for minutes until the railway rate-limited us. Wait until the train list changes.
+                    self.stuck[(date, number, cls)] = (time.time(), hit["free"])
+                    rec.ev("seats_unusable", train=number, cls=cls, skipped=len(skip))
+                    break
                 rec.ev("seats_gone", train=number, cls=cls, attempt=attempt + 1,
                        why="car lookup shows no matching seats")
                 continue
+            sent = True
             winner = self._settle_many(orders, t0)
+            if aimed and (not winner or winner[0] != aimed[0]):
+                now = time.time()
+                self.bad_seats = {k: at for k, at in list(self.bad_seats.items()) if now - at < 60}
+                for s in aimed[2]:
+                    self.bad_seats[(date, number, aimed[1], int(s))] = now
             if winner:
                 oid, car, who, data, path = winner
                 self._finalize(trip, date, hit, oid, car, who, data, time.time() - t0, path)
@@ -582,7 +629,10 @@ class Engine:
                 party = [p for p in party if str(p["friendId"]) not in held]
                 if not party:
                     return held
-        if not held:
+        if limited and not held:
+            self._alert_once("reserve-429", "The railway site is limiting bookings from this account right now. "
+                             "I keep watching and book again the moment it lets me.", 600)
+        elif not held and sent:
             self.stats["missed"] += 1
             rec.ev("missed", trip=trip["id"], train=number, cls=cls, why="seats taken before our hold settled")
             if time.time() - self.last_notice.get(("missed", trip["id"]), 0) > 60:
@@ -607,22 +657,25 @@ class Engine:
                 return groups
             time.sleep(0.6)
 
-    def _plan(self, groups, cls, trip, party):
+    def _plan(self, groups, cls, trip, party, skip=frozenset()):
+        """Best car for the party: the most passengers seated, then the fullest car; seats close together.
+        skip: {(car number, seat)} that just failed to book."""
         best = None
         for g in groups or []:
             if trip["maxPrice"] and int(g.get("tariff") or 0) > trip["maxPrice"]:
                 continue
             for car in g.get("cars") or []:
                 service = (car.get("schema") or {}).get("service")
-                if service != cls or not car.get("places"):
+                places = [p for p in car.get("places") or [] if (str(car["number"]), int(p)) not in skip]
+                if service != cls or not places:
                     continue
-                n = min(len(party), len(car["places"]))
+                n = min(len(party), len(places))
                 if trip["together"] and n < len(party):
                     continue
-                score = (n, -len(car["places"]))
+                score = (n, -len(places))
                 if best is None or score > best[0]:
                     best = (score, {"number": str(car["number"]), "carType": g.get("type"), "service": service},
-                            pick_seats(car["places"], n), party[:n])
+                            pick_seats(places, n), party[:n])
         return best[1:] if best else None
 
     def _reserve(self, trip, hit, car, seats_range, who):
@@ -714,7 +767,9 @@ class Engine:
             self.store.save()
         self._remember_pending(oid, add=False)
         if not self._attach_pay_link(hold, attempts=1):   # the Hamkorbank page, ~0.5 s normally
-            self._submit(self._pay_link_later, oid)       # bank slow or failing: don't hold back the message
+            # bank slow or failing: don't hold back the message. Own thread: it sleeps up to a minute, and in the
+            # shared pool that would hold up the checks.
+            threading.Thread(target=self._pay_link_later, args=(oid,), daemon=True).start()
         self.store.save()
         self.recent_held.setdefault((date, hit["number"], hit["cls"]), []).append((time.time(), len(who)))
         self.stats["holds"] += 1
@@ -763,6 +818,8 @@ class Engine:
                         h["expires_at"] = time.time() + (self.hold_mono[oid] - time.monotonic())
                     left = h["expires_at"] - time.time()
                     if left <= 0:
+                        if self._paid_meanwhile(oid, h):
+                            continue
                         # No renewals: the seat goes back on sale and these passengers are searched for again,
                         # so the watcher simply catches it (or another seat) when it shows up.
                         self._drop_hold(oid, "expired")
@@ -773,6 +830,23 @@ class Engine:
             except Exception:
                 log.exception("hold loop")
             time.sleep(1)
+
+    def _paid_meanwhile(self, oid, h) -> bool:
+        """We hear about a payment over the websocket. If it was down when the user paid (or the app was closed),
+        the hold looks unpaid and the watcher would book these passengers again. A ticket PDF exists only for a
+        paid order, so ask for it before treating a hold as unpaid."""
+        try:
+            pdf = self.client.ticket_pdf(oid) if self.client else None
+        except Exception:
+            pdf = None
+        if not pdf:
+            return False
+        h["paid"] = True
+        self.store.mark_done(h["trip"], h["passengers"])
+        self._drop_hold(oid, "paid")
+        rec.ev("paid", order=oid, pdf=True, found_late=True)
+        self.ui.paid(h, pdf)
+        return True
 
     def _drop_hold(self, oid, why):
         with self.store.lock:
@@ -803,9 +877,8 @@ class Engine:
     def transfer_hold(self, oid, from_pid: str, to_pid: str):
         """Give a held seat to another saved passenger: cancel the hold and at once re-book the very same
         seat(s) with `to_pid` in place of `from_pid` (everyone else sees a freed seat only after the railway's
-        2-9 s list delay, so we are first). `to_pid` also moves to the top of the trip's priority list, so if
-        the instant re-book fails the watcher looks for them first. `from_pid` stays in the trip.
-        Returns (ok, message)."""
+        2-9 s list delay, so we are first). In the trip, `to_pid` takes the place of `from_pid`, who leaves it;
+        if the re-book fails, the watcher searches for `to_pid`. Returns (ok, message)."""
         h = self.store.state["holds"].get(oid)
         if not h or not self.client:
             return False, "That reservation is no longer active."
@@ -832,11 +905,15 @@ class Engine:
         with self.lock:
             self.booking.add(trip["id"])
         try:
-            # the new passenger goes first in the trip's priority; the old one stays (searched for again)
-            order = [to_pid] + [p for p in trip["passengers"] if p != to_pid]
-            if len(order) > 4:
-                order = [p for p in order if p != from_pid][:4]
-            trip = self.store.upsert_trip(dict(trip, passengers=order))
+            # The new passenger takes the old one's place in the trip; the old one leaves it (user, 8 Nov: a
+            # transfer replaces the person, it must not leave the giver in the trip to be searched for again).
+            order = []
+            for p in trip["passengers"]:
+                q = to_pid if p == from_pid else p
+                if q not in order:
+                    order.append(q)
+            if to_pid not in order:              # the giver wasn't in the trip any more
+                order.insert(0, to_pid)
             trains = self.client.trains(h["date"], trip["from"]["code"], trip["to"]["code"])
             train = next((t for t in trains if t["number"] == h["train"]), None)
             if not train:
@@ -850,6 +927,9 @@ class Engine:
             t0 = time.time()
             self.client.cancel(oid)
             self._drop_hold(oid, "transferred")
+            # Only now, with the old seat released, edit the trip: had we stopped earlier (train list failed), the
+            # giver would still hold the seat while the trip already searched for the new passenger.
+            trip = self.store.upsert_trip(dict(trip, passengers=order[:4]))
             rec.ev("transfer_start", order=oid, train=h["train"], car=h["car"], range=rng, passengers=len(new_ids))
             # re-booking before the railway has released the seat just fails (measured: the release came 70 ms
             # after the cancel; a reserve sent at 49 ms failed and cost a whole extra round of ~1.8 s)
@@ -885,8 +965,8 @@ class Engine:
                 rec.ev("transfer_attempt", attempt=3, sent=len(orders), fallback="any seat in the car/class",
                        result="RESERVED" if winner else "FAILED", ms=round((time.time() - t0) * 1000))
             if not winner:
-                return False, ("The seats were released but someone else took them first. I'm searching for these "
-                               "passengers again, the new one first.")
+                return False, ("The seat was released, but the railway didn't give it back. The trip now searches for "
+                               "the new passenger instead.")
             new_oid, wcar, who, data, path = winner
             self._finalize(trip, h["date"], hit, new_oid, wcar, who, data, time.time() - t0, path)
             new = self.store.state["holds"].get(new_oid) or {}
@@ -911,7 +991,7 @@ class Engine:
             h["paid"] = True
             self.store.mark_done(h["trip"], h["passengers"])
             self._drop_hold(oid, "paid")
-            self._submit(self._deliver_ticket, h)
+            threading.Thread(target=self._deliver_ticket, args=(h,), daemon=True).start()   # retries sleep 45 s
         elif state == "PAYMENT_FAIL":
             self.ui.payment_failed(h)
         elif state == "ORDER_FAILED" and oid not in self.ours:
