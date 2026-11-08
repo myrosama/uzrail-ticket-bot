@@ -79,7 +79,8 @@ talk to it, quit, uninstall.
    - add a trip: route, dates, the trains and classes you accept, a maximum price and up to 4 passengers in
      priority order (from your saved passengers on the railway site);
    - choose **Auto-buy** or **Notify only**.
-4. Leave the computer on. On Windows and macOS the bot keeps it from sleeping while it watches.
+4. Leave the computer on. The bot keeps it from going to sleep by itself while it watches; closing a laptop's
+   lid still follows your system's lid setting.
 
 <p align="center">
   <img src="docs/screenshots/miniapp-home.png" width="250" alt="Your trips in the Telegram mini app, dark theme">
@@ -100,10 +101,10 @@ classes those trains have.
 ## What you get in Telegram
 
 1. **🎫 Tickets appeared**: train, class, free seats and price.
-2. **✅ Seats reserved**: car, seat and berth for each passenger. If someone was faster, you get
-   **❌ Not this time** and the bot keeps watching.
-3. **💳 Pay**, with a countdown (the railway holds seats for about 12 minutes). After you pay, the bot sends the
-   **ticket PDF**.
+2. **✅ Seats reserved** replaces it: car, seat and berth for each passenger, a **💳 Pay** button and a countdown
+   (the railway holds seats for about 12 minutes). If someone was faster, you get **❌ Not this time** and the bot
+   keeps watching.
+3. After you pay, the bot sends the **ticket PDF**.
 
 If you don't pay in time, the seats go back on sale. Those passengers go back on the search list, and the bot
 catches the seat again if it reappears.
@@ -196,7 +197,7 @@ seat again if it reappears, or another one.
 <details>
 <summary><b>Does my computer have to stay on?</b></summary>
 
-Yes. The bot can only watch while it runs. It keeps Windows and macOS awake while trips are active. For
+Yes. The bot can only watch while it runs. It keeps the computer awake while trips are active. For
 24/7 watching you can also run it on a small Linux server (`--headless`).
 </details>
 

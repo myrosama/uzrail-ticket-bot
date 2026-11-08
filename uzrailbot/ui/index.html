@@ -120,10 +120,19 @@
         <header class="page-head">
           <div class="head-row">
             <h1>Activity</h1>
-            <button class="btn ghost sm" data-console><svg><use href="#i-terminal"/></svg>Open live console</button>
+            <div class="row-btns" style="margin:0">
+              <button class="btn ghost sm" id="reportBtn" type="button">Report a problem</button>
+              <button class="btn ghost sm" data-console><svg><use href="#i-terminal"/></svg>Open live console</button>
+            </div>
           </div>
           <p class="muted">What the bot did since it started. The full record is in the data folder (logs).</p>
         </header>
+        <form class="card report" id="reportForm" hidden>
+          <label for="reportText">What went wrong?</label>
+          <textarea id="reportText" rows="3" maxlength="1000" required placeholder="For example: a seat was free but the bot didn't book it."></textarea>
+          <p class="muted small">Sends your note and this session's activity log to the developer, even if log sharing is off. The log has no names, passport numbers, passwords or emails.</p>
+          <div class="row-btns"><button class="btn ghost sm" id="reportCancel" type="button">Back</button><button class="btn primary sm" id="reportSend">Send report</button></div>
+        </form>
         <div class="filters" id="filters">
           <button class="chip on" data-f="all">All</button>
           <button class="chip" data-f="book">Seats &amp; bookings</button>
@@ -139,7 +148,7 @@
           <div class="item">
             <div><div>Start when I sign in to this computer</div>
               <div class="muted small">The bot starts in the tray and watches without opening the window.</div></div>
-            <label class="switch"><input type="checkbox" id="autostart"><span></span></label>
+            <label class="switch"><input type="checkbox" id="autostart" aria-label="Start when I sign in"><span></span></label>
           </div>
           <div class="item">
             <div><div>Closing the window</div>
@@ -167,7 +176,7 @@
           <div class="item">
             <div><div>Update automatically</div>
               <div class="muted small">New versions install in the background and restart the bot when no booking is in progress.</div></div>
-            <label class="switch"><input type="checkbox" id="autoUpdate"><span></span></label>
+            <label class="switch"><input type="checkbox" id="autoUpdate" aria-label="Update automatically"><span></span></label>
           </div>
           <div class="item">
             <div><div>Share usage logs</div>

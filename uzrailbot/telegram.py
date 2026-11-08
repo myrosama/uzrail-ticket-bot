@@ -130,6 +130,7 @@ class Bot:
         self.api = TgApi(store.bot_token())
         self.out = queue.Queue()
         self.wiz = None               # the trip wizard / account dialog in progress
+        self.found = {}               # (trip, date) -> message id of the "tickets appeared" note
         self.stop_ev = threading.Event()
         self.healthy = True
         self.last_error = ""
@@ -157,7 +158,18 @@ class Bot:
                 kind, text, markup, extra, doc, fname = self.out.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if kind == "msg" and markup is None:
+            if kind == "delfound":        # the "tickets appeared" note of a booking that has finished
+                mid = self.found.pop(extra, None)
+                if mid:
+                    try:
+                        self.api.call("deleteMessage", chat_id=chat, message_id=mid)
+                    except (TgError, requests.RequestException) as e:
+                        log.info("could not remove a note: %s", e)
+                continue
+            auto_kb = kind in ("msg", "quiet") and markup is None
+            if markup is False:           # on purpose no keyboard: this message gets deleted later, and deleting
+                markup = None             # the message that carries the reply keyboard could remove the keyboard
+            elif auto_kb:
                 # The Mini App reads its trips/passengers from the keyboard link, which Telegram only updates when a
                 # message carries it: give every plain message the fresh keyboard so the Mini App never goes stale.
                 try:
@@ -166,9 +178,10 @@ class Bot:
                     log.exception("building the keyboard")
             for attempt in range(60):
                 try:
-                    if kind == "msg":
-                        res = self.api.call("sendMessage", chat_id=chat, text=text, parse_mode="HTML",
-                                            reply_markup=markup, link_preview_options={"is_disabled": True})
+                    if kind in ("msg", "quiet"):
+                        res = self.api.call("sendMessage", chat_id=chat, text=text, parse_mode="HTML", reply_markup=markup,
+                                            disable_notification=True if kind == "quiet" else None,
+                                            link_preview_options={"is_disabled": True})
                         if extra:
                             extra(res["message_id"])
                     elif kind == "edit":
@@ -176,12 +189,17 @@ class Bot:
                                       reply_markup=markup, link_preview_options={"is_disabled": True})
                     else:
                         self.api.call("sendDocument", http_timeout=60, files={"document": (fname, doc, "application/pdf")},
-                                      chat_id=chat, caption=text, parse_mode="HTML")
+                                      chat_id=chat, caption=text, parse_mode="HTML",
+                                      reply_markup=json.dumps(self.main_kb()))
                     self.healthy = True
                     break
                 except TgError as e:
                     if e.retry_after:
                         time.sleep(e.retry_after)
+                        continue
+                    if auto_kb and e.code == 400 and "not modified" not in str(e):
+                        log.warning("telegram refused the keyboard, sending without it: %s", e)
+                        markup, auto_kb = None, False
                         continue
                     if "not modified" in str(e) or e.code == 400:
                         if "not modified" not in str(e):
@@ -257,7 +275,7 @@ class Bot:
         """The Mini App link, with the current state in the #fragment (no server needed)."""
         email, pw = self.store.railway_login()
         state = {
-            "v": 1, "bot": self.store.cfg["telegram"].get("bot_username", ""), "email": email, "hasPw": bool(pw),
+            "v": 2, "bot": self.store.cfg["telegram"].get("bot_username", ""), "email": email, "hasPw": bool(pw),
             "key": crypto.public_key_b64(self.store.transport_key()),
             "pax": [{"i": p["id"], "n": p["name"]} for p in (self.engine.passenger_list() if self.engine else [])],
             "trips": [dict({k: t[k] for k in ("id", "from", "to", "dates", "classes", "maxPrice", "mode", "passengers",
@@ -266,6 +284,9 @@ class Bot:
                                                                            if self.engine else [])][:12])
                       for t in self.store.trips()],
         }
+        state["holds"] = [{"t": h["train"], "c": h["car"], "s": h.get("seats") or [], "f": h["from"], "to": h["to"],
+                           "d": h.get("date"), "sum": h["total"], "exp": int(h["expires_at"]), "pay": h.get("pay_url") or "",
+                           "n": h.get("names") or []} for h in list(self.store.state.get("holds", {}).values())]
         raw = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         frag = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
         return self.store.cfg.get("webapp_url", "").rstrip("/") + "/#s=" + frag
@@ -299,6 +320,14 @@ class Bot:
         if act == "toggle":
             self.store.set_trip_active(str(d.get("id")), bool(d.get("active")))
             return self.send("▶️ Trip resumed." if d.get("active") else "⏸ Trip paused.", self.main_kb())
+        if act == "batch":
+            ops = [o for o in (d.get("ops") or []) if isinstance(o, dict)][:50]
+            for op in ops:
+                if op.get("a") == "del":
+                    self.store.delete_trip(str(op.get("id")))
+                elif op.get("a") == "toggle":
+                    self.store.set_trip_active(str(op.get("id")), bool(op.get("active")))
+            return self.send(f"✅ Saved {len(ops)} change{'' if len(ops) == 1 else 's'} to your trips.", self.main_kb())
         if act == "pax":
             return self.refresh_passengers()
         if act == "del":
@@ -861,9 +890,11 @@ class Bot:
             return self.edit(mid, "This reservation is no longer active.")
         names = {p["id"]: p["name"] for p in self.engine.passenger_list()}
         back = [{"text": "↩️ Back", "callback_data": f"xback:{oid}"}]
+        known = list(names) + list(h["passengers"])      # ids travel as 8-character prefixes (64-byte button limit)
+        parts = [oid] + [next((i for i in known if i.startswith(x)), x) for x in parts[1:]]
         seat_of = {pid: (h["seats"][i] if i < len(h.get("seats") or []) else "?") for i, pid in enumerate(h["passengers"])}
         if kind == "xfer" and len(h["passengers"]) > 1:
-            rows = [[{"text": f"{names.get(pid, 'Passenger')} (seat {seat_of[pid]})", "callback_data": f"xfrom:{oid}:{pid}"}]
+            rows = [[{"text": f"{names.get(pid, 'Passenger')} (seat {seat_of[pid]})", "callback_data": f"xfrom:{oid}:{pid[:8]}"}]
                     for pid in h["passengers"]] + [back]
             return self.edit(mid, "🔄 <b>Transfer a seat</b>\nWhose seat should go to someone else?", {"inline_keyboard": rows})
         if kind in ("xfer", "xfrom"):
@@ -874,7 +905,7 @@ class Bot:
                                       "or a ticket). Add people on eticket.uzrailpass.uz (My fellow travelers), then "
                                       "send /passengers.", {"inline_keyboard": [back]})
             rows = [[{"text": f"→ {p['name']} · " + (f"#{p['pos']} in this trip" if p["pos"] else "not in this trip"),
-                      "callback_data": f"xto:{oid}:{frm}:{p['id']}"}] for p in others[:12]] + [back]
+                      "callback_data": f"xto:{oid}:{frm[:8]}:{p['id'][:8]}"}] for p in others[:12]] + [back]
             return self.edit(mid, f"🔄 <b>Transfer seat {H(str(seat_of.get(frm, '?')))}</b> of "
                                   f"{H(names.get(frm, 'this passenger'))}\nWho should get it?", {"inline_keyboard": rows})
         frm, to = parts[1], parts[2]
@@ -888,7 +919,7 @@ class Bot:
                 f"{H(names.get(frm, 'their'))}'s place."
                 + (f"\n\n⚠️ This reservation has {len(h['passengers'])} passengers: all its seats are released and "
                    "re-booked together, so seat numbers may change." if len(h["passengers"]) > 1 else "")),
-                {"inline_keyboard": [[{"text": "✅ Move the seat", "callback_data": f"xgo:{oid}:{frm}:{to}"}], back]})
+                {"inline_keyboard": [[{"text": "✅ Move the seat", "callback_data": f"xgo:{oid}:{frm[:8]}:{to[:8]}"}], back]})
         # xgo: do it (takes a few seconds), without blocking the chat
         self.edit(mid, f"🔄 Moving the seat to <b>{H(names.get(to, '?'))}</b>…")
 
@@ -927,22 +958,23 @@ class Bot:
     def _pay_text(self, h):
         left = h["expires_at"] - time.time()
         until = time.strftime("%H:%M", time.localtime(h["expires_at"]))
-        return (f"💳 <b>Pay {fmt_sum(h['total'])} so'm</b> for train {H(h['train'])}, car {H(h['car'])}, "
-                f"seat{'s' if len(h['seats']) > 1 else ''} {H(', '.join(h['seats']) or '?')}\n"
-                f"⏳ <b>{fmt_left(left)}</b> left (until {until}). Not paid in time: the seats go back on sale and "
-                "I start searching again.")
+        return (self._hold_text(h) + f"\n\n⏳ <b>{fmt_left(left)}</b> left to pay (until {until}). Not paid in time: "
+                "the seats go back on sale and I start searching again.")
 
     def reserved(self, h):
-        # message 2 of 3 (success), then message 3 of 3 (payment with the Pay button)
-        self.send(self._hold_text(h))
+        # One card with everything; the "tickets appeared" note goes away. A silent line follows because only a
+        # plain message can refresh the Mini App's data (a message with Pay buttons can't carry the keyboard).
+        self.out.put(("delfound", None, None, (h["trip"], h.get("date")), None, None))
 
         def remember(mid):
             if h["order"] in self.store.state["holds"]:
                 self.store.state["holds"][h["order"]]["msg_id"] = mid
                 self.store.save()
         self.send(self._pay_text(h), self._hold_kb(h), on_sent=remember)
+        self.out.put(("quiet", "🚆 This seat is also listed in Trips &amp; settings.", None, None, None, None))
 
     def missed(self, trip, date, hit, why):
+        self.out.put(("delfound", None, None, (trip["id"], date), None, None))
         self.send(f"❌ <b>Not this time</b> · train {H(hit['number'])}, {label(hit['cls'])}, {fmt_day(date)}: "
                   f"{H(why)}.\nStill watching.")
 
@@ -988,7 +1020,8 @@ class Bot:
                          f"<b>{h['free']}</b> free · {fmt_sum(h['price'])} so'm")
         if buying:
             lines.append("\n⚡ Booking now…")
-            return self.send("\n".join(lines))
+            key = (trip["id"], date)
+            return self.send("\n".join(lines), False, on_sent=lambda mid: self.found.__setitem__(key, mid))
         self.send("\n".join(lines), {"inline_keyboard": [[{"text": "Open the railway site",
                                                            "url": "https://eticket.uzrailpass.uz/en/pages/trains-page"}]]})
 

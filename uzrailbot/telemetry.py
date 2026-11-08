@@ -58,6 +58,26 @@ def pack(text: str) -> bytes | None:
     return gz if len(gz) <= MAX_GZ else None      # shortcut: a session too big even then is skipped, not cut
 
 
+def _post(store, folder, gz: bytes, timeout: float):
+    return requests.post(URL, data=gz, timeout=timeout, headers={
+        "Content-Type": "application/gzip", "X-Install": install_id(store), "X-Session": folder.name,
+        "X-Version": __version__, "X-OS": f"{platform.system()} {platform.release()}"})
+
+
+def report(store, note: str, timeout: float = 15) -> bool:
+    """The user pressed "Report a problem": send this session's log with their note now. It is their explicit
+    request, so it works with sharing off. Not marked as sent: the upload at close replaces this copy."""
+    rec.ev("user_report", note=note[:1000])
+    if rec.folder is None:
+        return False
+    try:
+        gz = pack(scrub((rec.folder / "events.jsonl").read_text(encoding="utf-8", errors="replace")))
+        return gz is not None and _post(store, rec.folder, gz, timeout).status_code < 300
+    except (OSError, requests.RequestException) as e:
+        log.info("problem report not sent: %s", type(e).__name__)
+        return False
+
+
 def upload(store, closing: bool = False, timeout: float = 10) -> int:
     """At start: send every earlier session not sent yet. When closing: send only the current one (so quitting
     waits at most `timeout`). Never raises: offline or refused means trying again at the next start.
@@ -77,9 +97,7 @@ def upload(store, closing: bool = False, timeout: float = 10) -> int:
             if gz is None:
                 mark.write_text("too big")
                 continue
-            r = requests.post(URL, data=gz, timeout=timeout, headers={
-                "Content-Type": "application/gzip", "X-Install": install_id(store), "X-Session": folder.name,
-                "X-Version": __version__, "X-OS": f"{platform.system()} {platform.release()}"})
+            r = _post(store, folder, gz, timeout)
             if r.status_code < 300:
                 mark.write_text("")
                 sent += 1

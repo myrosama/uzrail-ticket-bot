@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import socket
 import sys
 import subprocess
@@ -68,6 +69,25 @@ class App:
             self.checks.append((row["ts"], row.get("ms", 0)))
         elif row["kind"] not in QUIET_KINDS:
             self.activity.append(row)
+            if row["kind"] == "held":      # own thread: this runs inside the booking
+                threading.Thread(target=self._notify, args=(row,), daemon=True).start()
+
+    def _notify(self, row):
+        """A desktop notification when a seat is held, for when Telegram isn't in front of you."""
+        title = "Seat held: pay now"
+        text = f"Train {row.get('train')}, car {row.get('car')}, seat {', '.join(row.get('seats') or ['?'])}. Pay in Telegram."
+        try:
+            if sys.platform == "darwin":
+                clean = lambda s: s.replace("\\", "").replace('"', "")
+                subprocess.run(["osascript", "-e", f'display notification "{clean(text)}" with title "{clean(title)}" '
+                                                   'sound name "Glass"'], timeout=10)
+            elif os.name == "nt":
+                if self.tray is not None and self.tray.HAS_NOTIFICATION:
+                    self.tray.notify(text, title)
+            elif shutil.which("notify-send"):
+                subprocess.run(["notify-send", "-u", "critical", title, text], timeout=10)
+        except Exception:
+            log.exception("desktop notification")
 
     def start_services(self):
         from .engine import Engine
@@ -276,6 +296,8 @@ class App:
             self.store.cfg["auto_update"] = bool(body.get("on"))
             self.store.save()
             return {"ok": True, "on": self.store.cfg["auto_update"]}
+        if path == "/api/report":
+            return {"ok": telemetry.report(self.store, str(body.get("note") or ""))}
         if path == "/api/sharelogs":
             self.store.cfg["share_logs"] = bool(body.get("on"))
             self.store.save()

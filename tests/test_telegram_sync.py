@@ -57,7 +57,8 @@ store, bot = make()
 trip = store.upsert_trip({"from": {"code": "2900790", "name": "URGENCH"}, "to": {"code": "2900002", "name": "TASHKENT SOUTH"},
                           "dates": ["2099-01-01"], "classes": ["3П"], "passengers": ["1"], "mode": "buy"})
 hold = {"order": "UO1", "trip": trip["id"], "train": "056Ж", "car": "10", "seats": ["12"], "total": 245140,
-        "expires_at": time.time() + 600, "pay_url": "https://pay", "msg_id": 99, "passengers": ["1"], "names": ["A"]}
+        "expires_at": time.time() + 600, "pay_url": "https://pay", "msg_id": 99, "passengers": ["1"], "names": ["A"],
+        "cls": "3П", "from": "URGENCH", "to": "TASHKENT"}
 
 # 1. a plain message carries the keyboard, so the Mini App link is refreshed with the current trips
 bot.send("hello")

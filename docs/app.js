@@ -26,6 +26,7 @@
     { v: 4, label: "Max", sub: "every 0.2 s" },
   ];
   const MAX_PAX = 4;
+  const MAX_DATES = 30;
 
   // ------------------------------------------------------------------ state from the bot
   function decodeState() {
@@ -42,6 +43,10 @@
   const S = decodeState() || { email: "", hasPw: false, key: "", pax: [], trips: [], demo: true };
   S.pax = S.pax || [];
   S.trips = S.trips || [];
+  // S.v >= 2: the bot understands several changes in one save. An older bot (not updated yet) keeps the old way.
+  const canBatch = S.v >= 2;
+  const pending = [];       // unsaved changes on the home page: {a:"toggle",id,active} or {a:"del",id}
+  const originalTrips = JSON.stringify(S.trips);
   const paxName = (id) => (S.pax.find((p) => p.i === id) || { n: "Passenger" }).n;
 
   // ------------------------------------------------------------------ helpers
@@ -216,6 +221,24 @@
     if (view === "account") return renderAccount();
   }
 
+  const holdCard = (h) => `<article class="card hold">
+      <div class="hold-top"><strong>${esc(title(h.f))} <span class="arrow">→</span> ${esc(title(h.to))}</strong>
+        <span class="timer" role="timer" data-exp="${+h.exp}"></span></div>
+      <div class="hold-line">Train ${esc(h.t)} · car ${esc(h.c)} · seat${(h.s || []).length > 1 ? "s" : ""} ${esc((h.s || []).join(", ") || "?")}${h.d ? ` · ${fmtDay(h.d)}` : ""}</div>
+      ${(h.n || []).length ? `<div class="hold-line">${esc(h.n.join(", "))}</div>` : ""}
+      ${h.pay ? `<button class="btn btn-primary hold-pay" data-pay="${esc(h.pay)}">Pay ${fmtSum(h.sum)} so'm</button>` : `<p class="hint">The payment link is in the chat.</p>`}
+    </article>`;
+  function tickHolds() {
+    document.querySelectorAll("[data-exp]").forEach((el) => {
+      const left = Math.floor(+el.dataset.exp - Date.now() / 1000);
+      el.textContent = left > 0 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : "expired";
+      const pay = el.closest(".hold").querySelector("[data-pay]");
+      if (pay && left <= 0) pay.disabled = true;
+    });
+  }
+  let holdTimer = null;
+  const guardPending = () => { if (pending.length) { toast("Save your changes first"); return false; } return true; };
+
   function renderHome() {
     $("#title").textContent = "UzRail Bot";
     $("#subtitle").textContent = S.email ? S.email : "Ticket watcher";
@@ -224,6 +247,21 @@
     if (S.demo) {
       app.insertAdjacentHTML("beforeend", `<div class="banner">This is a preview. Open it from your bot's
         <b>&nbsp;Trips &amp; settings&nbsp;</b> button to see your own trips and save changes.</div>`);
+    }
+    clearInterval(holdTimer);
+    const holds = (S.holds || []).filter((h) => h.exp * 1000 > Date.now());
+    if (holds.length) {
+      app.insertAdjacentHTML("beforeend", `<div class="section-head first"><h2>Held seats</h2></div>
+        <div class="stack">${holds.map(holdCard).join("")}</div>
+        <p class="hint">As of the bot's last message.</p><div class="section-gap"></div>`);
+      app.querySelectorAll("[data-pay]").forEach((b) => {
+        b.onclick = () => {
+          if (!/^https:\/\//.test(b.dataset.pay)) return;
+          if (inTelegram) tg.openLink(b.dataset.pay); else window.open(b.dataset.pay, "_blank", "noopener");
+        };
+      });
+      tickHolds();
+      holdTimer = setInterval(tickHolds, 1000);
     }
     app.appendChild($("#tpl-home").content.cloneNode(true));
 
@@ -237,7 +275,7 @@
         <div class="value">${connected ? esc(S.email) : "Not connected yet"}</div>
       </div>
       <button class="btn ${connected ? "" : "btn-soft"}" id="accBtn">${connected ? "Change" : "Connect"}</button>`;
-    $("#accBtn").onclick = () => render("account");
+    $("#accBtn").onclick = () => guardPending() && render("account");
 
     const trips = S.trips;
     $("#tripCount").textContent = trips.length ? `${trips.length}` : "";
@@ -271,23 +309,46 @@
         </div>
         <div class="trip-actions">
           <button data-act="edit">Edit</button>
+          <button data-act="ret">Return</button>
           <button data-act="toggle">${t.active ? "Pause" : "Resume"}</button>
           <button data-act="del" class="danger">Delete</button>
         </div>`;
-      el.querySelector('[data-act="edit"]').onclick = () => render("trip", t.id);
-      el.querySelector('[data-act="toggle"]').onclick = () => send({ a: "toggle", id: t.id, active: !t.active });
+      el.querySelector('[data-act="edit"]').onclick = () => guardPending() && render("trip", t.id);
+      el.querySelector('[data-act="ret"]').onclick = () => guardPending() && render("trip", { ret: t });
+      el.querySelector('[data-act="toggle"]').onclick = () => {
+        if (!canBatch) return send({ a: "toggle", id: t.id, active: !t.active });
+        t.active = !t.active;
+        const i = pending.findIndex((o) => o.a === "toggle" && o.id === t.id);
+        if (i >= 0) pending.splice(i, 1); else pending.push({ a: "toggle", id: t.id, active: t.active });
+        haptic(); renderHome();
+      };
       el.querySelector('[data-act="del"]').onclick = () => {
-        confirmThen("Delete this trip?", () => send({ a: "del", id: t.id }));
+        confirmThen("Delete this trip?", () => {
+          if (!canBatch) return send({ a: "del", id: t.id });
+          S.trips = S.trips.filter((x) => x !== t);
+          for (let i = pending.length - 1; i >= 0; i--) if (pending[i].id === t.id) pending.splice(i, 1);
+          pending.push({ a: "del", id: t.id });
+          haptic(); renderHome();
+        });
       };
       list.appendChild(el);
     }
-    setPrimary("New trip", () => render("trip", null));
+    if (pending.length) {
+      $("#tripCount").innerHTML = `<button class="link-btn" id="undoAll" type="button">Undo changes</button>`;
+      $("#undoAll").onclick = () => { S.trips = JSON.parse(originalTrips); pending.length = 0; haptic(); renderHome(); };
+      setPrimary(`Save ${pending.length} change${pending.length === 1 ? "" : "s"}`, () => send({ a: "batch", ops: pending }));
+    } else {
+      setPrimary("New trip", () => render("trip", null));
+    }
+    closingConfirm(pending.length > 0);
   }
 
   // ------------------------------------------------------------------ trip editor
   function renderTrip(id) {
-    const src = id ? S.trips.find((t) => t.id === id) : null;
-    const d = src ? JSON.parse(JSON.stringify(src)) : {
+    const ret = id && id.ret;           // "Return" on a trip card: the same trip, the other way, dates still to pick
+    const src = id && !ret ? S.trips.find((t) => t.id === id) : null;
+    const d = ret ? { ...JSON.parse(JSON.stringify(ret)), id: undefined, from: ret.to, to: ret.from, dates: [], trains: [], active: true }
+      : src ? JSON.parse(JSON.stringify(src)) : {
       from: null, to: null, dates: [], classes: [], maxPrice: 0, mode: "buy",
       passengers: [], speed: 1, trains: [], together: false, active: true,
     };
@@ -296,7 +357,7 @@
     let month = d.dates.length ? new Date(d.dates[0] + "T00:00:00") : today();
     month = new Date(month.getFullYear(), month.getMonth(), 1);
 
-    $("#title").textContent = src ? "Edit trip" : "New trip";
+    $("#title").textContent = src ? "Edit trip" : ret ? "Return trip" : "New trip";
     $("#subtitle").textContent = "Route, dates and who travels";
     setBack(() => render("home"));
 
@@ -320,6 +381,10 @@
         </div>
         <div class="cal" id="cal"></div>
         <div class="chosen" id="chosen"></div>
+        <div class="date-tools">
+          <button class="link-btn" id="next7" type="button">Next 7 days</button>
+          <button class="link-btn" id="rangeBtn" type="button" aria-pressed="false">Pick a range</button>
+        </div>
       </section>
 
       <section class="card form-section">
@@ -417,8 +482,21 @@
 
     // calendar
     const DOW = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+    let picking = false, rangeFrom = "";
+    function addDates(list) {
+      const all = [...new Set([...d.dates, ...list])].sort();
+      if (all.length > MAX_DATES) toast(`Up to ${MAX_DATES} dates per trip`);
+      d.dates = all.slice(0, MAX_DATES);
+    }
+    function daysBetween(a, b) {
+      const out = [], end = new Date((a < b ? b : a) + "T00:00:00");
+      for (let x = new Date((a < b ? a : b) + "T00:00:00"); x <= end; x.setDate(x.getDate() + 1)) out.push(iso(x));
+      return out;
+    }
     function drawCal() {
       $("#monthName").textContent = month.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+      $("#rangeBtn").textContent = !picking ? "Pick a range" : rangeFrom ? "Now tap the last day" : "Tap the first day";
+      $("#rangeBtn").setAttribute("aria-pressed", picking);
       const first = (month.getDay() + 6) % 7;
       const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
       const t0 = today(), last = new Date(t0); last.setDate(last.getDate() + 90);
@@ -436,7 +514,9 @@
       $("#cal").querySelectorAll(".day:not(:disabled)").forEach((b) => {
         b.onclick = () => {
           const k = b.dataset.d;
-          d.dates = d.dates.includes(k) ? d.dates.filter((x) => x !== k) : [...d.dates, k].sort();
+          if (picking && !rangeFrom) { rangeFrom = k; addDates([k]); }
+          else if (picking) { addDates(daysBetween(rangeFrom, k)); picking = false; rangeFrom = ""; }
+          else d.dates = d.dates.includes(k) ? d.dates.filter((x) => x !== k) : [...d.dates, k].sort();
           haptic(); drawCal(); validate(); refreshRoute(); refocus(`.day[data-d="${k}"]`);
         };
       });
@@ -445,6 +525,12 @@
       const prev = new Date(month.getFullYear(), month.getMonth(), 0);
       $("#prevM").disabled = prev < new Date(t0.getFullYear(), t0.getMonth(), 1);
     }
+    $("#rangeBtn").onclick = () => { picking = !picking; rangeFrom = ""; haptic(); drawCal(); };
+    $("#next7").onclick = () => {
+      const t0 = today(), end = new Date(t0); end.setDate(end.getDate() + 6);
+      addDates(daysBetween(iso(t0), iso(end)));
+      haptic(); drawCal(); validate(); refreshRoute();
+    };
     $("#prevM").onclick = () => { month = new Date(month.getFullYear(), month.getMonth() - 1, 1); drawCal(); };
     $("#nextM").onclick = () => { month = new Date(month.getFullYear(), month.getMonth() + 1, 1); drawCal(); };
     drawCal();

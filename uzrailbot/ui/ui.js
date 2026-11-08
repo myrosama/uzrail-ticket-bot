@@ -50,7 +50,7 @@
   function show(v) {
     view = v;
     try { localStorage.setItem("view", v); } catch (e) { /* storage off */ }
-    $$(".nav").forEach((b) => b.classList.toggle("on", b.dataset.view === v));
+    $$(".nav").forEach((b) => { b.classList.toggle("on", b.dataset.view === v); b.dataset.view === v ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"); });
     $$(".page").forEach((p) => (p.hidden = p.dataset.page !== v));
     if (v === "activity") renderFeed();
   }
@@ -296,7 +296,7 @@
           <div class="trip-route">${esc(t.from.name)} <span class="arrow">→</span> ${esc(t.to.name)}</div>
           <span class="pill ${status[0]}">${status[1]}</span>
           <label class="switch" title="${t.active ? "Pause this trip" : "Resume this trip"}">
-            <input type="checkbox" data-trip="${esc(t.id)}" ${t.active ? "checked" : ""}><span></span></label>
+            <input type="checkbox" aria-label="Watch this trip" data-trip="${esc(t.id)}" ${t.active ? "checked" : ""}><span></span></label>
         </div>
         <div class="dates">${dates.map((d) => `<span class="date ${d < S.today ? "past" : ""}">${esc(fmtDay(d))}</span>`).join("")}</div>
         <div class="tags">
@@ -380,6 +380,7 @@
     rate_limited: (o) => ["warn", `The railway site asked the bot to slow down: ${String(o.path).includes("reserve") ? "booking" : "that request"} waits ${o.pause_s} s`],
     booking_paused: () => ["warn", "Booking waits for the railway's limit to pass; still watching"],
     seats_unusable: (o) => ["", `The seats listed on train ${o.train} just failed to book; waiting until the list changes`],
+    user_report: () => ["ok", "You reported a problem"],
     share_logs: (o) => ["", o.on ? "Usage logs: sharing turned on" : "Usage logs: sharing turned off"],
     update_found: (o) => ["", `New version v${o.latest} found (you have v${o.current})`],
     update_installed: (o) => ["ok", `v${o.version} installed`],
@@ -418,7 +419,7 @@
     const b = e.target.closest("[data-f]");
     if (!b) return;
     filter = b.dataset.f;
-    $$("#filters .chip").forEach((x) => x.classList.toggle("on", x === b));
+    $$("#filters .chip").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", x === b); });
     renderFeed();
   });
   function renderFeed() {
@@ -476,6 +477,18 @@
   $("#shareLogs").addEventListener("change", async (e) => {
     const r = await api("/api/sharelogs", { on: e.target.checked });
     toast(r.on ? "Usage logs are shared with the developer" : "Usage logs stay on this PC");
+  });
+
+  /* ---------------------------------------------------------------- report a problem */
+  $("#reportBtn").addEventListener("click", () => { $("#reportForm").hidden = false; $("#reportText").focus(); });
+  $("#reportCancel").addEventListener("click", () => { $("#reportForm").hidden = true; });
+  $("#reportForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    $("#reportSend").disabled = true;
+    const r = await api("/api/report", { note: $("#reportText").value.trim() });
+    $("#reportSend").disabled = false;
+    if (r.ok) { $("#reportText").value = ""; $("#reportForm").hidden = true; toast("Report sent. Thank you!"); }
+    else toast("Couldn't send the report. Check the internet connection and try again.");
   });
 
   /* ---------------------------------------------------------------- settings */

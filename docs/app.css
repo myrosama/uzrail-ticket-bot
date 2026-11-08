@@ -329,6 +329,16 @@ details.more[open] summary { margin-bottom: 12px; }
 .more-trains { border: 1px dashed var(--line-strong); background: transparent; color: var(--green-dark); font-weight: 600;
   border-radius: var(--radius-sm); padding: 10px; font-size: 14px; }
 
+/* ---------- v0.5: held seats, date shortcuts ---------- */
+.section-head.first { margin-top: 0; }
+.section-gap { height: 12px; }
+.hold-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.hold-top .arrow { color: var(--muted); font-weight: 400; }
+.hold-line { margin-top: 6px; font-size: 14px; color: var(--ink-2); }
+.timer { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--amber); }
+.hold-pay { width: 100%; margin-top: 12px; }
+.date-tools { display: flex; gap: 16px; margin-top: 6px; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
