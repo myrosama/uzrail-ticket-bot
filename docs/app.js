@@ -84,7 +84,15 @@
     toast.timer = setTimeout(() => { t.hidden = true; }, ms);
   }
 
-  function send(payload) {
+  /* Over the live link when connected (the page stays open; returns true), otherwise through the chat. */
+  async function send(payload) {
+    if (liveOn && payload.a !== "account") {
+      try {
+        const n = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
+        const r = await fetch(liveUrl, { method: "POST", body: await seal({ ...payload, ts: Date.now() / 1000, n }) });
+        if (r.ok) return true;
+      } catch (e) { /* the chat below still works */ }
+    }
     const data = JSON.stringify(payload);
     if (data.length > 4000) { toast("Too much data for one save. Remove some dates."); return; }
     if (inTelegram) { closingConfirm(false); tg.sendData(data); return; }   // closes the Mini App; the bot replies
@@ -101,7 +109,7 @@
     if (inTelegram) {
       const mb = tg.MainButton;
       const dark = document.documentElement.dataset.theme === "dark";
-      mb.setParams({ text, color: dark ? "#2fd1bb" : "#008577", text_color: dark ? "#06231f" : "#ffffff", is_active: enabled, is_visible: !!handler });
+      mb.setParams({ text, color: dark ? "#2EDB7F" : "#087A41", text_color: dark ? "#04140B" : "#FFFFFF", is_active: enabled, is_visible: !!handler });
       return;
     }
     const bar = $("#bottomBar"), btn = $("#primaryBtn");
@@ -219,263 +227,564 @@
     app.onclick = app.oninput = app.onchange = null;      // the editor's unsaved-changes watcher
     closingConfirm(false);
     swipes(view === "home");
-    if (view === "home") return renderHome();
+    currentView = view;
+    const home = view === "home";
+    $("#tabs").hidden = !home;
+    document.body.classList.toggle("has-tabs", home);
+    delete $("#subtitle").dataset.tone;
+    if (home) return renderTab();
     if (view === "trip") return renderTrip(arg);
     if (view === "account") return renderAccount();
   }
 
-  const holdCard = (h) => `<article class="card hold">
-      <div class="hold-top"><strong>${esc(title(h.f))} <span class="arrow">→</span> ${esc(title(h.to))}</strong>
-        <span class="timer" role="timer" data-exp="${+h.exp}"></span></div>
-      <div class="hold-line">Train ${esc(h.t)} · car ${esc(h.c)} · seat${(h.s || []).length > 1 ? "s" : ""} ${esc((h.s || []).join(", ") || "?")}${h.d ? ` · ${fmtDay(h.d)}` : ""}</div>
-      ${(h.n || []).length ? `<div class="hold-line">${esc(h.n.join(", "))}</div>` : ""}
-      ${h.pay ? `<button class="btn btn-primary hold-pay" data-pay="${esc(h.pay)}">Pay ${fmtSum(h.sum)} so'm</button>` : `<p class="hint">The payment link is in the chat.</p>`}
-    </article>`;
-  function tickHolds() {
-    let expired = false;
-    document.querySelectorAll("[data-exp]").forEach((el) => {
-      const left = Math.floor(+el.dataset.exp - Date.now() / 1000);
-      el.textContent = left > 0 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : "expired";
-      const pay = el.closest(".hold").querySelector("[data-pay]");
-      if (pay && left <= 0) pay.disabled = true;
-      if (left <= 0) expired = true;
-    });
-    if (expired) renderHome();      // the highlight on that passenger's name ends with the hold
+  // ------------------------------------------------------------------ live link to the PC (uzrailbot/remote.py)
+  const liveUrl = S.live ? S.live.u + S.live.i : "";
+  let liveOn = false, liveAge = 0, gotAt = 0, liveKey = null, shownSig = "", currentView = "";
+  let tab = "now", tripsTab = "active", feedFilter = "all", sheet = null, shownHolds = 0;
+  const bytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  async function keyOf() {
+    if (!liveKey) liveKey = await crypto.subtle.importKey("raw", bytes(S.live.k.replace(/-/g, "+").replace(/_/g, "/")), "AES-GCM", false, ["encrypt", "decrypt"]);
+    return liveKey;
   }
-  let holdTimer = null;
-  let homeTab = "active";
-  // Completed: every passenger has a paid ticket, or all the dates have passed.
+  async function seal(obj) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await keyOf(), new TextEncoder().encode(JSON.stringify(obj))));
+    const all = new Uint8Array(iv.length + ct.length);
+    all.set(iv); all.set(ct, iv.length);
+    let s = "";
+    for (const b of all) s += String.fromCharCode(b);
+    return btoa(s);
+  }
+  async function unseal(text) {
+    const raw = bytes(text);
+    return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12) }, await keyOf(), raw.slice(12))));
+  }
+  async function pull() {
+    try {
+      const r = await fetch(liveUrl, { cache: "no-store" });
+      if (r.status !== 200) { liveOn = false; refreshShown(); return; }
+      const j = await r.json();
+      Object.assign(S, await unseal(j.data));
+      liveAge = j.age; gotAt = Date.now(); liveOn = true;
+      S.pax = S.pax || []; S.trips = S.trips || [];
+      refreshShown();
+    } catch (e) { liveOn = false; refreshShown(); }
+  }
+  const pcLost = () => !!(S.live && gotAt && (!liveOn || elapsed() > 35));
+  const stateSig = () => JSON.stringify([S.holds, S.trips, S.paused, S.status && [S.status.state, S.status.detail], S.targets, S.shareLogs, S.autoUpdate,
+    (S.board || []).map((b) => [b.from, b.to, b.date, b.trains]), (S.activity || []).length && S.activity[S.activity.length - 1].ts, liveOn, pcLost()]);
+  function refreshShown() {
+    if (currentView !== "home" || sheet || (document.activeElement && document.activeElement.tagName === "TEXTAREA")) return;
+    if (stateSig() !== shownSig) renderTab();
+  }
+
+  // ------------------------------------------------------------------ small pieces
+  const ms = (n, c = "") => `<span class="ms ${c}" aria-hidden="true">${n}</span>`;
+  const hhmm = (x) => String(x || "").slice(-5);
+  const nextDay = (dep, arr) => arr && String(dep || "").slice(0, 10) !== String(arr).slice(0, 10);
+  const ago = (sec) => sec < 60 ? `${Math.max(1, Math.round(sec))} s ago` : `${Math.round(sec / 60)} min ago`;
+  const elapsed = () => (Date.now() - gotAt + liveAge) / 1000;
+  const dayLong = (s) => new Date(s + "T00:00:00").toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).replace(",", "");
+  const clock = (left) => `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  const secsLeft = (exp) => Math.floor(+exp - Date.now() / 1000);
+  const activeHolds = () => (S.holds || []).filter((h) => h.exp * 1000 > Date.now()).sort((a, b) => a.exp - b.exp);
+  const guardPending = () => { if (pending.length) { toast("Save your changes first"); return false; } return true; };
   const isCompleted = (t) => (t.dates || []).every((d) => d < iso(today())) ||
     (t.mode === "buy" && t.passengers.length > 0 && t.passengers.every((p) => (t.done || []).includes(p)));
-  // Yellow: this passenger holds a seat on this watch, not paid yet. Lime: paid. Both belong to this one watch.
-  function person(t, p, i, holds) {
-    const st = (t.done || []).includes(p) ? "paid" : holds.some((h) => h.trip === t.id && (h.p || []).includes(p)) ? "held" : "";
-    const say = st === "paid" ? ", ticket paid" : st === "held" ? ", seat held, not paid yet" : "";
-    return `<span class="person ${st}">${st ? `<span aria-hidden="true">✓</span>` : ""}${i + 1}. ${esc(paxName(p))}${say ? `<span class="sr-only">${say}</span>` : ""}</span>`;
+  const route = (a, b) => `${esc(title(a))} → ${esc(title(b))}`;
+  const initials = (n) => String(n || "?").trim().split(/\s+/).slice(0, 2).map((x) => x[0]).join("").toUpperCase();
+  function duration(dep, arr) {
+    const p = (x) => { const [d, t] = String(x).split(" "); const [D, M, Y] = d.split("."); return new Date(`${Y}-${M}-${D}T${t}:00`); };
+    const m = Math.round((p(arr) - p(dep)) / 60000);
+    return m > 0 ? `${Math.floor(m / 60)} h ${m % 60} m` : "";
   }
-  const guardPending = () => { if (pending.length) { toast("Save your changes first"); return false; } return true; };
+  const seatText = (h, i) => { const b = { "В": "upper", "Н": "lower" }[(h.st || [])[i]]; return `${esc((h.s || [])[i] || "?")}${b ? ` ${b}` : ""}`; };
+  const seatsLine = (h) => (h.s || []).map((_, i) => seatText(h, i)).join(", ") || "?";
 
-  function renderHome() {
-    $("#title").textContent = "UzRail Bot";
-    $("#subtitle").textContent = S.email ? S.email : "Ticket watcher";
-    setBack(null);
-    app.innerHTML = "";
-    if (S.demo) {
-      app.insertAdjacentHTML("beforeend", `<div class="banner">This is a preview. Open it from your bot's
-        <b>&nbsp;Trips &amp; settings&nbsp;</b> button to see your own trips and save changes.</div>`);
-    }
-    clearInterval(holdTimer);
-    const holds = (S.holds || []).filter((h) => h.exp * 1000 > Date.now());
-    if (holds.length) {
-      app.insertAdjacentHTML("beforeend", `<div class="section-head first"><h2>Held seats</h2></div>
-        <div class="stack">${holds.map(holdCard).join("")}</div>
-        <p class="hint">As of the bot's last message.</p><div class="section-gap"></div>`);
-      app.querySelectorAll("[data-pay]").forEach((b) => {
-        b.onclick = () => {
-          if (!/^https:\/\//.test(b.dataset.pay)) return;
-          if (inTelegram) tg.openLink(b.dataset.pay); else window.open(b.dataset.pay, "_blank", "noopener");
-        };
-      });
-      tickHolds();
-      holdTimer = setInterval(tickHolds, 1000);
-    }
-    app.appendChild($("#tpl-home").content.cloneNode(true));
+  function tick() {
+    document.querySelectorAll("[data-exp]").forEach((el) => {
+      const left = secsLeft(el.dataset.exp);
+      el.textContent = (el.dataset.pre || "") + (left > 0 ? clock(left) : "0:00");
+      el.classList.toggle("low", left < 180);
+    });
+    document.querySelectorAll("[data-bar]").forEach((el) => {
+      const left = Math.max(0, secsLeft(el.dataset.bar));
+      el.firstElementChild.style.width = `${Math.min(100, left / 720 * 100).toFixed(2)}%`;
+      el.classList.toggle("low", left < 180);
+    });
+    document.querySelectorAll("[data-at]").forEach((el) => { el.textContent = `checked ${ago(Math.max(0, S.now + elapsed() - +el.dataset.at))}`; });
+    const c = $("#checkedAgo");
+    if (c && S.status) c.textContent = `checked ${ago(Math.max(0, S.now + elapsed() - S.status.lastCheck))}`;
+    if (currentView === "home" && !sheet && (activeHolds().length !== shownHolds || stateSig() !== shownSig)) renderTab();
+  }
 
-    const acc = $("#accountCard");
-    const connected = S.email && S.hasPw;
-    acc.classList.toggle("warn", !connected);
-    acc.innerHTML = `
-      <div class="avatar">${connected ? esc(S.email[0].toUpperCase()) : "!"}</div>
-      <div class="grow">
-        <div class="label">Railway account</div>
-        <div class="value">${connected ? esc(S.email) : "Not connected yet"}</div>
-      </div>
-      <button class="btn ${connected ? "" : "btn-soft"}" id="accBtn">${connected ? "Change" : "Connect"}</button>`;
-    $("#accBtn").onclick = () => guardPending() && render("account");
-
-    const trips = S.trips;
-    $("#tripCount").textContent = trips.length ? `${trips.length}` : "";
-    const list = $("#tripList");
-    const completed = trips.filter(isCompleted), active = trips.filter((t) => !isCompleted(t));
-    const shown = homeTab === "completed" ? completed : active;
-    $("#tripTabs").innerHTML = [["active", "Active", active], ["completed", "Completed", completed]]
-      .map(([v, name, l]) => `<button data-v="${v}" class="${homeTab === v ? "on" : ""}" aria-pressed="${homeTab === v}">${name} · ${l.length}</button>`).join("");
-    $("#tripTabs").querySelectorAll("button").forEach((b) => { b.onclick = () => { homeTab = b.dataset.v; haptic(); renderHome(); }; });
-    if (!shown.length && homeTab === "completed") {
-      list.innerHTML = `<div class="card empty"><strong>Nothing completed yet</strong>
-        <p>A trip moves here when every ticket is paid or its dates have passed.</p></div>`;
-    } else if (!shown.length) {
-      list.innerHTML = `<div class="card empty">
-        <div class="empty-icon"><svg viewBox="0 0 24 24" width="26" height="26"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
-        <strong>No trips yet</strong>
-        <p>Add a route and dates. The bot watches every second and books the moment seats appear.</p></div>`;
+  // ------------------------------------------------------------------ Now
+  function statusHtml() {
+    const lost = pcLost();
+    const line = (dot, b, rest, end = "") => `<div class="status" id="status"><div>${dot}<b>${b}</b>${rest}</div>${end}</div>`;
+    if (S.live && !gotAt) return line(`<span class="dot"></span>`, "Connecting to your computer…", "");
+    if (lost) return `<div class="problem bad" id="status">${ms("desktop_access_disabled")}<div><b>Your computer isn't responding</b><p>Last seen ${ago(elapsed())}. No new seats can be caught until it's back. Check that it's on and online.</p></div></div>`;
+    if (!S.status) return line(`<span class="dot"></span>`, "Showing the bot's last message", "");
+    if (S.status.state === "offline") return `<div class="problem warn" id="status">${ms("cloud_off")}<div><b>No answer from the railway site</b><p>The bot keeps trying. Seats it already holds stay held.</p></div></div>`;
+    if (S.paused) return line(ms("pause", "fill"), "Paused", "", `<button class="resume" id="pauseToggle">Resume</button>`);
+    if (S.status.state === "idle" || !S.trips.some((t) => t.active && !isCompleted(t))) return line(`<span class="dot"></span>`, "No active trips", "");
+    if (S.status.state === "watching") return line(`<span class="dot on"></span>`, "Watching", `<span>·</span><span class="num" id="checkedAgo"></span>`,
+      `<button class="icon-btn" id="pauseToggle" aria-label="Pause watching">${ms("pause_circle")}</button>`);
+    return line(`<span class="dot"></span>`, esc(S.status.detail || S.status.state), "");
+  }
+  function holdBig(h) {
+    const trip = S.trips.find((t) => t.id === h.trip), who = (h.n || []).join(", ");
+    const pos = trip && (h.p || []).length === 1 ? trip.passengers.indexOf(h.p[0]) + 1 : 0;
+    const dur = h.dep && h.arr ? duration(h.dep, h.arr) : "";
+    return `<article class="block hold" data-o="${esc(h.o || "")}">
+      <div class="bar" data-bar="${+h.exp}"><div></div></div>
+      <div class="hold-in">
+        <div class="hold-row"><div><div class="left-label">${ms("timer", "fill")}Left to pay</div><div class="cd big" role="timer" data-exp="${+h.exp}"></div></div>
+          <div class="price"><b>${fmtSum(h.sum)}</b><span>so'm</span></div></div>
+        <div class="journey"><div class="journey-date">${h.d ? dayLong(h.d) : ""}</div>
+          <div class="journey-times"><div><b>${hhmm(h.dep)}</b><span>${esc(title(h.f))}</span></div>
+            <div class="journey-mid"><i></i>${dur}<i></i></div>
+            <div><b>${hhmm(h.arr)}${nextDay(h.dep, h.arr) ? "<sup>+1</sup>" : ""}</b><span>${esc(title(h.to))}</span></div></div></div>
+        <div class="meta4"><div><small>Train</small><b>${esc(h.t)}</b></div><div><small>Car</small><b>${esc(h.c)}</b></div>
+          <div><small>Seat</small><b>${(h.s || []).length === 1 ? `${esc(h.s[0])} ${BERTH((h.st || [])[0])}` : esc((h.s || []).join(", "))}</b></div>
+          <div><small>Class</small><b>${h.cls ? esc(shortClass(h.cls)) : ""}</b></div></div>
+        <div class="who"><span>${esc(initials((h.n || [])[0]))}</span><div><b>${esc(who)}</b>${pos ? `<small>Passenger ${pos} of ${trip.passengers.length}</small>` : ""}</div></div>
+        ${h.pay ? `<button class="btn primary big pay-big" data-pay="${esc(h.pay)}">Pay ${fmtSum(h.sum)} so'm${ms("arrow_forward")}</button>` : `<p class="hint" style="padding:14px 0 0">The payment link is on its way.</p>`}
+        ${S.v >= 3 && h.o ? `<div class="two"><button data-xfer>${ms("swap_horiz")}Transfer</button><button data-cancel>${ms("close")}Cancel</button></div>` : ""}
+      </div></article>`;
+  }
+  const BERTH = (x) => { const b = { "В": "upper", "Н": "lower" }[x]; return b ? `<em>${b}</em>` : ""; };
+  function holdSmall(h) {
+    return `<article class="block tight hold" data-o="${esc(h.o || "")}">
+      <div class="hold-small"><div class="route-line">${route(h.f, h.to)}${h.d ? ` · ${dayLong(h.d)}` : ""}${h.dep ? ` · <span class="num">${hhmm(h.dep)} → ${hhmm(h.arr)}</span>` : ""}</div>
+        <div class="line"><div class="tleft"><div class="cd mid" role="timer" data-exp="${+h.exp}"></div><small>left to pay</small></div>
+          <div class="pinfo"><b>${esc((h.n || []).join(", "))}</b><div>${esc(h.t)} · Car ${esc(h.c)} · Seat ${seatsLine(h)}${h.cls ? `<br>${esc(shortClass(h.cls))}` : ""}</div></div></div>
+        <div class="btn-row">${h.pay ? `<button class="btn primary" data-pay="${esc(h.pay)}">Pay ${fmtSum(h.sum)} so'm</button>` : `<button class="btn primary" disabled>Link on its way</button>`}
+          ${S.v >= 3 && h.o ? `<button class="btn" data-xfer>Transfer</button><button class="btn" data-cancel>Cancel</button>` : ""}</div></div>
+      <div class="bar thin" data-bar="${+h.exp}"><div></div></div></article>`;
+  }
+  function cellHtml(c, v, t) {
+    const wanted = !t.classes.length || t.classes.includes(c), over = t.maxPrice && v.price > t.maxPrice;
+    const k = v.free <= 0 ? "sold" : !wanted ? "off" : over ? "over" : "match";
+    const icon = k === "match" ? ms("check") : k === "over" ? ms("arrow_upward") : "";
+    return `<span class="cell ${k}">${icon}<b>${esc(shortClass(c))}</b><span class="d">${v.free > 0 ? `${v.free} · ${fmtSum(v.price)}` : "sold out"}</span></span>`;
+  }
+  function boardHtml() {
+    if (S.paused || !S.board) return "";
+    const cards = [];
+    for (const t of S.trips.filter((x) => x.active && !isCompleted(x))) {
+      for (const d of [...t.dates].sort().filter((x) => x >= (S.today || iso(today())))) {
+        const b = S.board.find((x) => x.from === t.from.code && x.to === t.to.code && x.date === d);
+        const rows = !b ? `<p class="pad">Waiting for the first check…</p>` : !b.trains.length ? `<p class="pad">No trains on this date.</p>`
+          : [...b.trains].sort((x, y) => hhmm(x.dep).localeCompare(hhmm(y.dep))).map((tr) => {
+            const cells = Object.entries(tr.classes).sort(([x], [y]) => (t.classes.includes(y) ? 1 : 0) - (t.classes.includes(x) ? 1 : 0));
+            const sold = !cells.length || cells.every(([, v]) => v.free <= 0);
+            return `<div class="tr"><div class="tr-top"><b>${esc(tr.number)}</b><span class="t">${hhmm(tr.dep)} → ${hhmm(tr.arr)}${nextDay(tr.dep, tr.arr) ? "<sup>+1</sup>" : ""}</span>${sold ? `<span class="cell sold">sold out</span>` : ""}</div>
+              ${sold ? "" : `<div class="cells">${cells.map(([c, v]) => cellHtml(c, v, t)).join("")}</div>`}</div>`;
+          }).join("");
+        cards.push(`<section class="board"><div class="board-head"><b>${esc(t.from.name.toUpperCase())} → ${esc(t.to.name.toUpperCase())} <span>· ${dayLong(d)}</span></b>${b ? `<small data-at="${+b.at}"></small>` : ""}</div>${rows}</section>`);
+      }
     }
-    for (const t of shown) {
-      const done = isCompleted(t);
-      const q = (act) => el.querySelector(`[data-act="${act}"]`) || {};      // completed cards have fewer buttons
-      const future = (t.dates || []).filter((d) => d >= iso(today()));
-      const el = document.createElement("article");
-      el.className = "card trip";
-      el.innerHTML = `
-        <div class="trip-main">
-          <div class="trip-route"><span class="status-dot ${t.active ? "" : "off"}"></span>
-            ${esc(title(t.from.name))} <span class="arrow">→</span> ${esc(title(t.to.name))}</div>
-          <div class="trip-meta">
-            ${(future.length ? future : t.dates).slice(0, 6).map((d) => `<span class="tag">${fmtDay(d)}</span>`).join("")}
-            ${future.length > 6 ? `<span class="tag">+${future.length - 6}</span>` : ""}
-          </div>
-          <div class="trip-meta">
-            <span class="tag ${t.mode === "buy" ? "green" : ""}">${t.mode === "buy" ? "Auto-buy" : "Notify only"}</span>
-            ${(t.classes.length ? t.classes : ["any"]).map((c) => `<span class="tag">${c === "any" ? "Any class" : esc(shortClass(c))}</span>`).join("")}
-            ${t.maxPrice ? `<span class="tag">≤ ${fmtSum(t.maxPrice)} so'm</span>` : ""}
-            ${t.trains && t.trains.length ? `<span class="tag">Only ${esc(t.trains.join(", "))}</span>` : ""}
-            ${t.active ? "" : `<span class="tag amber">Paused</span>`}
-          </div>
-          ${t.mode === "buy" ? `<div class="trip-people">${t.passengers.map((p, i) => person(t, p, i, holds)).join("")}</div>` : ""}
-        </div>
-        ${(t.tk || []).length ? `<div class="trip-tickets">${t.tk.map((x) => `<div>Train ${esc(x.t)} · car ${esc(x.c)} · seat ${esc((x.s || []).join(", ") || "?")}</div>`).join("")}</div>` : ""}
-        <div class="trip-actions">
-          ${done ? ((t.tk || []).length ? `<button data-act="get">Get tickets</button>` : "") : `<button data-act="edit">Edit</button>`}
-          <button data-act="ret">Return</button>
-          ${done ? "" : `<button data-act="toggle">${t.active ? "Pause" : "Resume"}</button>`}
-          <button data-act="del" class="danger">Delete</button>
-        </div>`;
-      q("get").onclick = () => guardPending() && send({ a: "tickets", id: t.id });
+    if (!cards.length) return "";
+    return `<div class="board-wrap"><h2>Right now on the railway site</h2>
+      <div class="legend"><span class="cell match">${ms("check")}matches your trip</span><span class="cell over">${ms("arrow_upward")}above your max price</span><span class="cell sold">sold out</span><span class="cell off">not chosen</span></div>
+      ${cards.join("")}<div class="note">Prices per seat in so'm.</div></div>`;
+  }
+  function renderNow() {
+    const holds = activeHolds(), active = S.trips.filter((t) => !isCompleted(t));
+    if (!active.length && !holds.length) {
+      app.innerHTML = statusHtml() + `<div class="empty"><span class="empty-icon">${ms("radar")}</span><h2>Nothing to watch yet</h2>
+        <p>Add a trip with your route and dates. The bot checks the railway site and holds a seat as soon as one appears, then you have about 12 minutes to pay.</p></div>`;
+      setPrimary("New trip", () => render("trip", null));
+      bindPause();
+      return;
+    }
+    const strip = active.map((t) => {
+      const held = holds.filter((h) => h.trip === t.id).reduce((n, h) => n + (h.p || []).length, 0);
+      const left = t.mode === "buy" ? t.passengers.filter((p) => !(t.done || []).includes(p)).length - held : 0;
+      const ds = t.dates.filter((d) => d >= iso(today()));
+      const when = `${ds.slice(0, 3).map((d) => fmtDay(d)).join(", ")}${ds.length > 3 ? ` +${ds.length - 3}` : ""}`;
+      const sub = !t.active ? "Paused" : [held ? `${held} held` : "", left > 0 ? `${left} searching` : ""].filter(Boolean).join(" · ") || (t.mode === "buy" ? "" : "Notify only");
+      return `<button data-go-trips><span class="bub ${t.active ? "" : "off"}">${ms(t.active ? "radar" : "pause", t.active ? "" : "fill")}</span><span><b>${route(t.from.name, t.to.name)}</b><small>${when}${sub ? ` · ${sub}` : ""}</small></span></button>`;
+    }).join("");
+    const heldTrips = S.trips.filter((t) => holds.some((h) => h.trip === t.id) && !isCompleted(t));
+    const n = holds.length;
+    app.innerHTML = statusHtml() + `<div class="strip">${strip}</div>
+      <div class="page-head" style="padding-top:8px"><h1 class="page-title">${n ? `${n} seat${n === 1 ? "" : "s"} held` : "No seats held"}</h1>
+        <p class="lead">${n ? "Pay before the timer ends or the seat goes back on sale." : "The bot holds a seat the moment one appears."}</p></div>
+      ${holds.map((h, i) => i ? holdSmall(h) : holdBig(h)).join("")}
+      ${heldTrips.length ? `<h2 class="h2-sec">Active trip${heldTrips.length === 1 ? "" : "s"}</h2>${heldTrips.map((t) => tripCard(t, holds)).join("")}` : ""}
+      ${boardHtml()}`;
+    app.querySelectorAll("[data-go-trips]").forEach((b) => { b.onclick = () => { tab = "trips"; tripsTab = "active"; window.scrollTo(0, 0); haptic(); renderTab(); }; });
+    app.querySelectorAll("[data-pay]").forEach((b) => {
+      b.onclick = () => {
+        if (!/^https:\/\//.test(b.dataset.pay)) return;
+        if (inTelegram) tg.openLink(b.dataset.pay); else window.open(b.dataset.pay, "_blank", "noopener");
+      };
+    });
+    app.querySelectorAll(".hold").forEach((card) => {
+      const o = card.dataset.o, x = card.querySelector("[data-xfer]"), c = card.querySelector("[data-cancel]");
+      if (x) x.onclick = () => openSheet(o);
+      if (c) {
+        c.onclick = () => confirmThen("Cancel this reservation? The seats go back on sale and the trip is paused.", async () => {
+          if (await send({ a: "cancel", order: o })) { S.holds = S.holds.filter((h) => h.o !== o); toast("Cancelling…"); renderTab(); }
+        });
+      }
+    });
+    bindTripActions();
+    bindPause();
+    setPrimary("New trip", null);
+  }
+  function bindPause() {
+    const b = $("#pauseToggle");
+    if (b) b.onclick = () => { S.paused = !S.paused; send({ a: "pause", on: S.paused }); haptic(); renderTab(); };
+  }
+
+  // ------------------------------------------------------------------ transfer sheet
+  function openSheet(order) {
+    const h = S.holds.find((x) => x.o === order);
+    sheet = { order, from: (h.p || [])[0], to: ((S.targets || {})[order] || [])[0]?.id || "" };
+    drawSheet();
+  }
+  function closeSheet() { sheet = null; $("#sheet").hidden = true; renderTab(); }
+  function drawSheet() {
+    const h = S.holds.find((x) => x.o === sheet.order);
+    if (!h) return closeSheet();
+    const targets = (S.targets || {})[sheet.order] || [];
+    const seatOf = (p) => seatText(h, (h.p || []).indexOf(p));
+    const trip = S.trips.find((t) => t.id === h.trip);
+    const busy = (trip ? trip.passengers : []).filter((p) => !targets.some((x) => x.id === p) && !(h.p || []).includes(p));
+    const holderOf = (p) => (S.holds || []).find((x) => (x.p || []).includes(p));
+    const to = targets.find((x) => x.id === sheet.to);
+    const box = $("#sheet");
+    box.hidden = false;
+    box.innerHTML = `<div class="sheet xfer" role="dialog" aria-modal="true" aria-label="Transfer a seat"><div class="handle"></div>
+      <div class="sheet-top"><div><h3>Transfer a seat</h3><p>The seat is released and booked again for the new passenger straight away.</p></div>
+        <span class="time-pill">${ms("timer", "fill")}<span data-exp="${+h.exp}"></span></span></div>
+      <div class="sheet-label">Seat of</div>
+      <div class="pick-group">${(h.p || []).map((p, i) => `<button class="pick" data-from="${esc(p)}"><span class="radio ${p === sheet.from ? "on" : ""}"></span><span class="inf"><b>${esc((h.n || [])[i] || "Passenger")}</b><small>Car ${esc(h.c)} · Seat ${seatText(h, i)}</small></span></button>`).join("")}</div>
+      <div class="down">${ms("arrow_downward")}</div>
+      <div class="sheet-label close">Goes to</div>
+      <div class="pick-group">${targets.map((x) => `<button class="pick" data-to="${esc(x.id)}"><span class="radio ${x.id === sheet.to ? "on" : ""}"></span><span class="inf"><b>${esc(x.name)}</b><small>${x.pos ? `Passenger ${x.pos} · still searching` : "Not on this trip"}</small></span></button>`).join("")}
+        ${busy.map((p) => { const o = holderOf(p); return `<button class="pick" disabled><span class="radio none"></span><span class="inf"><b>${esc(paxName(p))}</b><small>${o ? `Already holds seat ${esc((o.s || [])[(o.p || []).indexOf(p)] || "?")}` : "Already has a ticket"}</small></span></button>`; }).join("")}
+        ${!targets.length && !busy.length ? `<p class="pad">Nobody else can take this seat.</p>` : ""}</div>
+      <button class="btn primary big" id="moveSeat" ${to ? "" : "disabled"}>Move the seat</button>
+      ${to ? `<div class="caption">Seat ${seatOf(sheet.from)} goes to ${esc(to.name)}</div>` : ""}
+      <button class="btn big" id="sheetBack" style="margin-top:8px;background:none">Back</button></div>`;
+    box.onclick = (e) => { if (e.target === box) closeSheet(); };
+    box.querySelectorAll("[data-from]").forEach((b) => { b.onclick = () => { sheet.from = b.dataset.from; haptic(); drawSheet(); }; });
+    box.querySelectorAll("[data-to]").forEach((b) => { b.onclick = () => { sheet.to = b.dataset.to; haptic(); drawSheet(); }; });
+    $("#sheetBack").onclick = closeSheet;
+    $("#moveSeat").onclick = async () => {
+      const body = { a: "transfer", order: sheet.order, from: sheet.from, to: sheet.to };
+      if (await send(body)) { toast("Moving the seat…"); closeSheet(); }
+    };
+    tick();
+  }
+
+  // ------------------------------------------------------------------ Trips
+  function personRow(t, p, i, holds) {
+    const hold = holds.find((h) => h.trip === t.id && (h.p || []).includes(p));
+    const paid = (t.done || []).includes(p);
+    const k = paid ? "paid" : hold ? "held" : "";
+    const st = paid ? `<span class="st">Paid</span>${ms("check", "bold")}`
+      : hold ? `<span class="st" data-pre="Held · pay in " data-exp="${+hold.exp}"></span>${ms("check", "bold")}`
+      : `<span class="st">Searching</span>${ms("progress_activity")}`;
+    return `<div class="person ${k}"><span class="n">${i + 1}</span><span class="name">${esc(paxName(p))}</span>${st}</div>`;
+  }
+  function tripCard(t, holds) {
+    const ds = (t.dates || []).filter((d) => d >= iso(today()));
+    const shown = ds.length ? ds : t.dates;
+    const cls = t.classes.length ? t.classes.map(shortClass).join(", ") : "Any class";
+    const trains = t.trains && t.trains.length ? `${t.trains.join(", ")} only` : "Any train";
+    return `<article class="trip ${t.active ? "" : "paused"}" data-id="${esc(t.id)}">
+      <div class="pills">${t.active ? `<span class="pill go"><i></i>Watching</span>` : `<span class="pill off">${ms("pause", "fill")}Paused</span>`}
+        ${t.mode === "buy" ? `<span class="pill">${ms("bolt", "fill")}Auto-buy</span>` : `<span class="pill line">${ms("notifications")}Notify only</span>`}</div>
+      <h2>${route(t.from.name, t.to.name)}</h2>
+      <div class="when">${shown.slice(0, 4).map(dayLong).join(" · ")}${shown.length > 4 ? ` +${shown.length - 4}` : ""}</div>
+      <div class="kv"><span>Classes</span><span>${esc(cls)}</span>
+        <span>Max price</span><span>${t.maxPrice ? `${fmtSum(t.maxPrice)} so'm` : "No limit"}</span>
+        <span>Trains</span><span>${esc(trains)}</span></div>
+      ${t.mode === "buy" ? `<div class="pax-label">PASSENGERS · IN PRIORITY ORDER</div><div class="rows">${t.passengers.map((p, i) => personRow(t, p, i, holds)).join("")}</div>` : ""}
+      <div class="acts"><button data-act="edit">${ms("edit")}Edit</button><button data-act="ret">${ms("u_turn_left")}Return trip</button>
+        ${t.active ? `<button data-act="toggle">${ms("pause")}Pause</button>` : `<button data-act="toggle" class="go">${ms("play_arrow", "fill")}Resume</button>`}
+        <button data-act="del" class="red">${ms("delete")}Delete</button></div></article>`;
+  }
+  function ticketCard(t, holds) {
+    const tickets = t.tk || [];
+    return `<article class="ticket" data-id="${esc(t.id)}"><div class="ticket-top"><div class="when">${t.dates.slice(0, 3).map(dayLong).join(" · ")}</div><h2>${route(t.from.name, t.to.name)}</h2>
+        ${t.mode === "buy" ? `<div class="rows">${t.passengers.map((p, i) => personRow(t, p, i, holds)).join("")}</div>` : ""}</div>
+      ${tickets.map((x) => `<div class="perf"></div><div class="meta3"><div><small>Train</small><b>${esc(x.t)}</b></div><div><small>Car</small><b>${esc(x.c)}</b></div><div><small>Seat</small><b>${esc((x.s || []).join(", ") || "?")}</b></div></div>`).join("")}
+      <div class="ticket-acts">${tickets.length ? `<button class="btn primary" data-act="get">${ms("download")}Get tickets</button>` : ""}
+        <div class="two strong"><button data-act="ret">${ms("u_turn_left")}Return trip</button><button data-act="del" class="red">${ms("delete")}Delete</button></div></div></article>`;
+  }
+  function bindTripActions() {
+    app.querySelectorAll(".trip, .ticket").forEach((el) => {
+      const t = S.trips.find((x) => x.id === el.dataset.id), q = (a) => el.querySelector(`[data-act="${a}"]`) || {};
+      q("get").onclick = async () => { if (guardPending() && await send({ a: "tickets", id: t.id })) toast("Sending your tickets to the chat"); };
       q("edit").onclick = () => guardPending() && render("trip", t.id);
       q("ret").onclick = () => guardPending() && render("trip", { ret: t });
       q("toggle").onclick = () => {
-        if (!canBatch) return send({ a: "toggle", id: t.id, active: !t.active });
         t.active = !t.active;
-        const i = pending.findIndex((o) => o.a === "toggle" && o.id === t.id);
-        if (i >= 0) pending.splice(i, 1); else pending.push({ a: "toggle", id: t.id, active: t.active });
-        haptic(); renderHome();
+        if (liveOn || !canBatch) send({ a: "toggle", id: t.id, active: t.active });
+        else {
+          const i = pending.findIndex((o) => o.a === "toggle" && o.id === t.id);
+          if (i >= 0) pending.splice(i, 1); else pending.push({ a: "toggle", id: t.id, active: t.active });
+        }
+        haptic(); renderTab();
       };
-      q("del").onclick = () => {
-        confirmThen("Delete this trip?", () => {
-          if (!canBatch) return send({ a: "del", id: t.id });
-          S.trips = S.trips.filter((x) => x !== t);
+      q("del").onclick = () => confirmThen("Delete this trip?", () => {
+        S.trips = S.trips.filter((x) => x !== t);
+        if (liveOn || !canBatch) send({ a: "del", id: t.id });
+        else {
           for (let i = pending.length - 1; i >= 0; i--) if (pending[i].id === t.id) pending.splice(i, 1);
           pending.push({ a: "del", id: t.id });
-          haptic(); renderHome();
-        });
-      };
-      list.appendChild(el);
-    }
-    if (pending.length) {
-      $("#tripCount").innerHTML = `<button class="link-btn" id="undoAll" type="button">Undo changes</button>`;
-      $("#undoAll").onclick = () => { S.trips = JSON.parse(originalTrips); pending.length = 0; haptic(); renderHome(); };
-      setPrimary(`Save ${pending.length} change${pending.length === 1 ? "" : "s"}`, () => send({ a: "batch", ops: pending }));
-    } else {
-      setPrimary("New trip", () => render("trip", null));
-    }
+        }
+        haptic(); renderTab();
+      });
+    });
+  }
+  function renderTrips() {
+    const holds = activeHolds(), completed = S.trips.filter(isCompleted), active = S.trips.filter((t) => !isCompleted(t));
+    const list = tripsTab === "completed" ? completed : active;
+    active.sort((a, b) => Number(b.active) - Number(a.active));
+    const body = list.length ? list.map((t) => (tripsTab === "completed" ? ticketCard(t, holds) : tripCard(t, holds))).join("")
+      : tripsTab === "completed" ? `<div class="empty small"><h2 style="margin-top:0">No completed trips yet</h2><p>Paid tickets show up here with their train, car and seat.</p></div>`
+      : `<div class="empty small"><span class="empty-icon quiet">${ms("route")}</span><h2>No active trips</h2><p>Add a route and dates. The bot starts watching as soon as you save.</p></div>`;
+    app.innerHTML = `<div class="page-head"><h1 class="page-title">Trips</h1>
+        <div class="seg" id="tripTabs" role="group" aria-label="Show trips" style="margin-top:14px">${[["active", "Active", active], ["completed", "Completed", completed]]
+          .map(([v, n, l]) => `<button data-v="${v}" class="${tripsTab === v ? "on" : ""}" aria-pressed="${tripsTab === v}">${n} <span class="dim">${l.length}</span></button>`).join("")}</div></div>
+      ${pending.length ? `<button id="undoAll" type="button">Undo changes</button>` : ""}${body}`;
+    $("#tripTabs").querySelectorAll("button").forEach((b) => { b.onclick = () => { tripsTab = b.dataset.v; haptic(); renderTab(); }; });
+    if ($("#undoAll")) $("#undoAll").onclick = () => { S.trips = JSON.parse(originalTrips); pending.length = 0; haptic(); renderTab(); };
+    bindTripActions();
+    if (pending.length) setPrimary(`Save ${pending.length} change${pending.length === 1 ? "" : "s"}`, () => send({ a: "batch", ops: pending }));
+    else setPrimary("New trip", () => render("trip", null));
     closingConfirm(pending.length > 0);
+  }
+
+  // ------------------------------------------------------------------ Activity
+  // shortcut: a copy of the wording in uzrailbot/ui/ui.js, share one file if they start to differ
+  const EV = {
+    session_start: null, heartbeat: null, notify: null, plan: null, miniapp: null, http: null, ws: null, check: null,
+    start: (o) => [o.updated_from ? "ok" : "", o.updated_from ? `Updated v${o.updated_from} → v${o.version} and restarted` : `Bot v${o.version} started on this PC`],
+    stop: () => ["", "Bot stopped"],
+    state: (o) => (o.state === "watching" ? null : o.state === "offline" ? ["bad", "Lost the connection to the railway site"]
+      : ["", `Status: ${o.state}${o.detail ? ` (${o.detail})` : ""}`]),
+    trip_trains: (o) => ["", o.trains.length ? `Trip now watches only train ${o.trains.join(", ")}` : "Trip now watches all trains"],
+    trip_deleted: () => ["", "Trip deleted"],
+    availability: (o) => o.free > 0
+      ? ["ok", `${o.free} seat${o.free === 1 ? "" : "s"} · ${shortClass(o.cls)} · train ${o.train} · ${fmtDay(o.date)} · ${fmtSum(o.price)} so'm`]
+      : ["", `Seats sold out again on train ${o.train} (${shortClass(o.cls)})`],
+    detect: (o) => ["ok", `New seats on ${fmtDay(o.date)}, booking now`],
+    fanout: (o) => ["", `Trying ${o.cars.length} cars at once on train ${o.train}`],
+    reserve_sent: (o) => ["", `Booking request sent for car ${o.car} (${o.ms} ms)`],
+    reserve_refused: (o) => ["warn", `Railway refused car ${o.car}: ${o.message || o.status}`],
+    settled: (o) => [o.result === "RESERVED" ? "ok" : "warn", `Car ${o.car || "?"}: ${o.result === "RESERVED" ? "reserved" : o.result.toLowerCase()}${o.ms ? ` after ${o.ms} ms` : ""}`],
+    held: (o) => ["ok", `Held seats ${(o.seats || []).join(", ")} on train ${o.train}, car ${o.car} in ${o.took_s} s`],
+    extra_hold_cancelled: (o) => ["", `Released a duplicate hold in car ${o.car}`],
+    seats_gone: () => ["warn", "The seats were gone before we could book"],
+    missed: (o) => ["bad", `Missed: ${o.why}`],
+    pay_link: () => ["", "Payment link ready"],
+    pay_link_fail: () => ["warn", "Could not make the payment link yet, retrying"],
+    transfer_start: (o) => ["", `Moving the seat in car ${o.car} of train ${o.train} to another passenger`],
+    transfer_attempt: (o) => [o.result === "RESERVED" ? "ok" : "warn", o.result === "RESERVED" ? "Seat moved to the new passenger" : `Re-booking the seat, try ${o.attempt}`],
+    transfer_error: (o) => ["bad", `Transfer failed: ${o.error}`],
+    user_transfer: (o) => [o.ok ? "ok" : "warn", o.ok ? "You moved a held seat to another passenger" : "A seat transfer didn't work"],
+    passengers_refreshed: (o) => ["", `Saved passengers reloaded (${o.count})`],
+    renew_attempt: null, renew_error: null,
+    hold_end: (o) => ["warn", `Hold ended: ${o.why}`],
+    recover_hold: () => ["", "Restored a held reservation after restart"],
+    recover_cancel: () => ["", "Cancelled a leftover reservation from the last run"],
+    recover_drop_hold: () => ["", "A saved reservation is no longer active"],
+    paid: (o) => ["ok", `Paid! ${o.pdf ? "Ticket PDF sent to Telegram" : "Ticket confirmed"}`],
+    pdf_fail: () => ["warn", "Could not download the ticket PDF (get it on the railway site)"],
+    returned_from_bank: () => ["", "Back from the bank, checking the payment"],
+    user_pause: () => ["", "Paused"],
+    user_resume: () => ["", "Resumed"],
+    user_cancel_hold: () => ["", "You cancelled a reservation"],
+    trip_saved: (o) => ["", `Trip saved: ${o.dates.length} date${o.dates.length === 1 ? "" : "s"}, ${o.classes.map(shortClass).join(", ")}`],
+    account_saved: (o) => ["ok", `Railway account connected (${o.passengers} saved passenger${o.passengers === 1 ? "" : "s"})`],
+    learned_cars: (o) => ["", `Learned the car numbers of train ${o.train}`],
+    check_fail: (o) => ["warn", `Check failed: ${o.error}`],
+    http_fail: (o) => ["warn", `Network problem${o.error ? `: ${o.error}` : ""}`],
+    book_error: (o) => ["bad", `Booking error: ${o.error}`],
+    cars_retry: () => ["", "Car list was empty, asking again"],
+    rate_limited: (o) => ["warn", `The railway site asked the bot to slow down: ${String(o.path).includes("reserve") ? "booking" : "that request"} waits ${o.pause_s} s`],
+    booking_paused: () => ["warn", "Booking waits for the railway's limit to pass; still watching"],
+    seats_unusable: (o) => ["", `The seats listed on train ${o.train} just failed to book; waiting until the list changes`],
+    user_report: () => ["ok", "You reported a problem"],
+    share_logs: (o) => ["", o.on ? "Usage logs: sharing turned on" : "Usage logs: sharing turned off"],
+    update_found: (o) => ["", `New version v${o.latest} found (you have v${o.current})`],
+    update_installed: (o) => ["ok", `v${o.version} installed`],
+    update_restart: (o) => ["", `Restarting into v${o.new}`],
+    update_failed: (o) => ["warn", `Update to v${o.version} failed: ${o.error}`],
+  };
+
+  function describe(r) {
+    const f = EV[r.kind];
+    if (f === null) return null;
+    if (!f) return ["", r.kind.replace(/_/g, " ")];
+    try { return f(r); } catch (e) { return ["", r.kind.replace(/_/g, " ")]; }
+  }
+  const BOOKING = new Set(["availability", "detect", "fanout", "reserve_sent", "reserve_refused", "settled", "held",
+    "extra_hold_cancelled", "seats_gone", "missed", "pay_link", "transfer_start", "transfer_attempt", "user_transfer", "hold_end", "paid", "user_cancel_hold",
+    "recover_hold"]);
+  function markOf(r, tone) {
+    if (r.kind === "held") return ["held", "event_seat"];
+    if (r.kind === "paid") return ["paid", "check"];
+    if (tone === "bad") return ["bad", "desktop_access_disabled"];
+    if (tone === "warn") return ["warn", "speed"];
+    if (tone === "ok") return ["ok", "check_circle"];
+    return ["info", "radar"];
+  }
+  function renderActivity() {
+    const all = (S.activity || []).map((r) => [r, describe(r)]).filter(([, d]) => d).reverse();
+    const isBook = ([r]) => BOOKING.has(r.kind), isBad = ([, d]) => d[0] === "bad" || d[0] === "warn";
+    const rows = all.filter((x) => feedFilter === "all" || (feedFilter === "book" ? isBook(x) : isBad(x)));
+    const dayName = (ts) => { const d = new Date(ts * 1000); return d.toDateString() === new Date().toDateString() ? "TODAY" : d.toLocaleDateString("en-GB", { day: "numeric", month: "short" }).toUpperCase(); };
+    let last = "", html = "";
+    for (const [r, d] of rows) {
+      const name = r.ts ? dayName(r.ts) : "";
+      if (name !== last) { html += `<div class="day">${name}</div>`; last = name; }
+      const [k, icon] = markOf(r, d[0]);
+      html += `<div class="ev"><time>${esc(String(r.t || "").slice(0, 5))}</time><span class="mark ${k}">${ms(icon)}</span><span>${esc(d[1])}</span></div>`;
+    }
+    app.innerHTML = `<div class="page-head"><h1 class="page-title">Activity</h1>
+      <div class="filters" id="feedTabs" role="group" aria-label="Filter">${[["all", "All", all.length], ["book", "Bookings", all.filter(isBook).length], ["bad", "Problems", all.filter(isBad).length]]
+        .map(([v, n, c]) => `<button data-v="${v}" class="${feedFilter === v ? "on" : ""}" aria-pressed="${feedFilter === v}">${n}<span>${c}</span></button>`).join("")}</div></div>
+      <div class="feed">${html || `<p class="pad" style="padding-left:0">${S.live ? "Nothing yet." : "The activity feed needs your computer connected."}</p>`}</div>`;
+    $("#feedTabs").querySelectorAll("button").forEach((b) => { b.onclick = () => { feedFilter = b.dataset.v; haptic(); renderTab(); }; });
+    setPrimary("New trip", null);
+  }
+
+  // ------------------------------------------------------------------ Settings
+  function renderSettings() {
+    const connected = S.email && S.hasPw;
+    const sw = (id, name, sub, on, off) => `<label class="row"><span class="inf"><b>${name}</b><small>${sub}</small></span>
+      <span class="switch"><input type="checkbox" id="${id}" aria-label="${name}" ${on ? "checked" : ""} ${off ? "disabled" : ""}><span></span></span></label>`;
+    app.innerHTML = `<div class="page-head" style="padding-bottom:4px"><h1 class="page-title">Settings</h1></div>
+      <div class="group-label" style="margin-top:18px">RAILWAY ACCOUNT</div>
+      <div class="set-block acct"><span class="av">${ms("person", "fill")}</span><div class="inf"><b>${connected ? esc(S.email) : "Not connected yet"}</b><small>${connected ? "Signed in" : "Add your railway login"}</small></div>
+        <button class="link" id="accBtn">${connected ? "Change" : "Connect"}</button></div>
+      <div class="group-label">BOT</div>
+      <div class="set-block">
+        ${sw("pauseAll", "Watching", "Check the railway site for all active trips", !S.paused, S.v < 3)}
+        ${sw("autoUp", "Update automatically", "Install new versions of the bot on your computer", S.autoUpdate !== false, !liveOn)}
+        ${sw("shareLogs", "Share usage logs", "Sends activity logs so we can fix problems faster. No names, passport numbers or passwords.", S.shareLogs !== false, !liveOn)}
+        <div class="row" style="min-height:52px"><span class="inf"><b>Version</b></span><span class="dim num">${esc(S.version || "–")}</span></div>
+      </div>
+      <div class="group-label">REPORT A PROBLEM</div>
+      <div class="set-block report">
+        <label for="reportText" class="sr-only">What happened?</label>
+        <textarea id="reportText" rows="4" maxlength="1000" placeholder="What happened? Add the train and time if you can."></textarea>
+        <div class="report-foot"><span>This session's log is attached.</span><button class="btn primary" id="reportSend" ${S.v < 3 ? "disabled" : ""}>${ms("send")}Send</button></div>
+      </div>`;
+    $("#accBtn").onclick = () => guardPending() && render("account");
+    $("#pauseAll").onchange = (e) => { S.paused = !e.target.checked; send({ a: "pause", on: S.paused }); };
+    $("#autoUp").onchange = (e) => { S.autoUpdate = e.target.checked; send({ a: "autoupdate", on: S.autoUpdate }); };
+    $("#shareLogs").onchange = (e) => { S.shareLogs = e.target.checked; send({ a: "sharelogs", on: S.shareLogs }); };
+    $("#reportSend").onclick = async () => {
+      const note = $("#reportText").value.trim();
+      if (!note) return toast("Write what happened first");
+      if (await send({ a: "report", note })) { $("#reportText").value = ""; toast("Report sent. Thank you!"); }
+    };
+    setPrimary("New trip", null);
+  }
+
+  function renderTab() {
+    shownSig = stateSig();
+    shownHolds = activeHolds().length;
+    setBack(null);
+    document.querySelectorAll("#tabs button").forEach((b) => {
+      const on = b.dataset.tab === tab;
+      b.classList.toggle("on", on);
+      if (on) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+    });
+    $("#nowBadge").hidden = !shownHolds;
+    $("#nowBadge").textContent = shownHolds;
+    ({ now: renderNow, trips: renderTrips, activity: renderActivity, settings: renderSettings })[tab]();
+    if (S.demo) app.insertAdjacentHTML("afterbegin", `<div class="banner">This is a preview. Open it from your bot's Trips &amp; settings button.</div>`);
+    tick();
+  }
+  document.querySelectorAll("#tabs button").forEach((b) => { b.onclick = () => { tab = b.dataset.tab; window.scrollTo(0, 0); haptic(); renderTab(); }; });
+
+  // ------------------------------------------------------------------ views
+  function render(view, arg) {
+    window.scrollTo(0, 0);
+    app.onclick = app.oninput = app.onchange = null;      // the editor's unsaved-changes watcher
+    closingConfirm(false);
+    swipes(view === "home");
+    currentView = view;
+    const home = view === "home";
+    $("#tabs").hidden = !home;
+    document.body.classList.toggle("has-tabs", home);
+    if (home) return renderTab();
+    if (view === "trip") return renderTrip(arg);
+    if (view === "account") return renderAccount();
   }
 
   // ------------------------------------------------------------------ trip editor
   function renderTrip(id) {
-    const ret = id && id.ret;           // "Return" on a trip card: the same trip, the other way, dates still to pick
+    const ret = id && id.ret;           // "Return trip" on a card: the same trip, the other way, dates still to pick
     const src = id && !ret ? S.trips.find((t) => t.id === id) : null;
     const d = ret ? { ...JSON.parse(JSON.stringify(ret)), id: undefined, from: ret.to, to: ret.from, dates: [], trains: [], active: true }
       : src ? JSON.parse(JSON.stringify(src)) : {
-      from: null, to: null, dates: [], classes: [], maxPrice: 0, mode: "buy",
-      passengers: [], speed: 1, trains: [], together: false, active: true,
-    };
+        from: null, to: null, dates: [], classes: [], maxPrice: 0, mode: "buy",
+        passengers: [], speed: 1, trains: [], together: false, active: true,
+      };
     d.trains = d.trains || [];
     d.dates = (d.dates || []).filter((x) => x >= iso(today()));
     let month = d.dates.length ? new Date(d.dates[0] + "T00:00:00") : today();
     month = new Date(month.getFullYear(), month.getMonth(), 1);
-
-    $("#title").textContent = src ? "Edit trip" : ret ? "Return trip" : "New trip";
-    $("#subtitle").textContent = "Route, dates and who travels";
     setBack(() => render("home"));
-
-    app.innerHTML = `
-      <section class="card form-section">
-        <h2>Route</h2>
-        <div class="route">
-          <div class="fields"><div id="fromBox"></div><div id="toBox"></div></div>
-          <button class="swap" id="swap" aria-label="Swap stations">
-            <svg viewBox="0 0 24 24" width="20" height="20"><path d="M7 4v14m0 0l-3-3m3 3l3-3M17 20V6m0 0l-3 3m3-3l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
-      </section>
-
-      <section class="card form-section">
-        <h2>Dates</h2>
-        <div class="cal-head">
-          <button class="icon-btn" id="prevM" aria-label="Previous month"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
-          <strong id="monthName"></strong>
-          <button class="icon-btn" id="nextM" aria-label="Next month"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
-        </div>
+    const sec = (n, name, sumId) => `<div class="sec"><i>${n}</i><b>${name}</b><span id="${sumId}"></span></div>`;
+    app.innerHTML = `<div class="page-head"><h1 class="page-title">${src ? "Edit trip" : ret ? "Return trip" : "New trip"}</h1></div>
+      <div class="sec" style="padding-top:24px"><i>1</i><b>Route</b></div>
+      <div class="card2"><div class="stations"><div id="fromBox"></div><div class="st-line"></div><div id="toBox"></div>
+        <button class="swap" id="swap" aria-label="Swap stations">${ms("swap_vert")}</button></div></div>
+      ${sec(2, "Dates", "dateSum")}
+      <div class="card2" style="padding:12px 10px 10px">
+        <div class="date-tools"><button id="next7" type="button">Next 7 days</button><button id="rangeBtn" type="button" aria-pressed="false">${ms("date_range")}<span id="rangeText">Pick a range</span></button></div>
+        <div class="cal-head"><b id="monthName"></b><div><button class="icon-btn" id="prevM" aria-label="Previous month">${ms("chevron_left")}</button><button class="icon-btn" id="nextM" aria-label="Next month">${ms("chevron_right")}</button></div></div>
+        <div class="dow">${["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map((x) => `<span>${x}</span>`).join("")}</div>
         <div class="cal" id="cal"></div>
-        <div class="chosen" id="chosen"></div>
-        <div class="date-tools">
-          <button class="link-btn" id="next7" type="button">Next 7 days</button>
-          <button class="link-btn" id="rangeBtn" type="button" aria-pressed="false">Pick a range</button>
-        </div>
-      </section>
-
-      <section class="card form-section">
-        <h2>Trains on this route <span class="muted small" id="trainCount"></span></h2>
-        <div id="trainList"></div>
-        <p class="hint" id="trainHint"></p>
-      </section>
-
-      <section class="card form-section">
-        <h2>Ticket classes</h2>
-        <div class="chips" id="classes"></div>
-        <details class="more-classes" id="otherClasses" hidden>
-          <summary>Other classes <span class="muted" id="otherCount"></span></summary>
-          <div class="chips" id="classesOther"></div>
-        </details>
-        <p class="hint" id="classHint"></p>
-        <div class="field" style="margin-top:14px">
-          <label for="maxPrice">Maximum price per ticket (optional)</label>
-          <div class="input-wrap"><input class="input" id="maxPrice" inputmode="numeric" placeholder="No limit"><span class="suffix">so'm</span></div>
-        </div>
-      </section>
-
-      <section class="card form-section">
-        <h2>When seats appear</h2>
-        <div class="seg" id="mode">
-          <button data-v="buy">Auto-buy</button>
-          <button data-v="notify">Notify only</button>
-        </div>
-        <p class="hint" id="modeHint"></p>
-      </section>
-
-      <section class="card form-section" id="paxSection">
-        <h2 class="row-head">Passengers <button class="link-btn" id="paxRefresh" type="button">↻ Refresh list</button></h2>
-        <div class="pax" id="pax"></div>
-        <p class="hint">Tap to choose (up to ${MAX_PAX}). The order is the priority: if fewer seats appear, the first ones get them.</p>
-        <div class="divider"></div>
-        <label class="switch-row">
-          <span class="txt">Keep everyone together<small>On: book only when all passengers fit in one car. Off: book whoever fits first, so people may end up in different cars, classes or trains.</small></span>
-          <span class="switch"><input type="checkbox" id="together"><span></span></span>
-        </label>
-      </section>
-
-      <section class="card form-section">
-        <details class="more" id="more">
-          <summary>Advanced <span class="muted" id="moreSum"></span></summary>
-          <div class="field">
-            <label>Check speed</label>
-            <div class="seg" id="speed"></div>
-          </div>
-        </details>
-      </section>`;
+      </div>
+      ${sec(3, "Trains", "trainSum")}
+      <div class="card2" id="trainList"></div>
+      ${sec(4, "Classes", "classSum")}
+      <div class="tiles" id="classes"></div>
+      <details class="other" id="otherClasses" hidden><summary id="otherCount"></summary><div class="tiles" id="classesOther"></div></details>
+      <div class="hint" id="classHint"></div>
+      <div class="sec"><i>5</i><b>Maximum price</b><span>per ticket</span></div>
+      <div class="card2 price-box"><div class="price-in"><input id="maxPrice" inputmode="numeric" placeholder="No limit" aria-label="Maximum price per ticket"><span>so'm</span></div>
+        <p>Trains above this price are skipped. Leave it empty for no limit.</p></div>
+      <div class="sec"><i>6</i><b>When a seat appears</b></div>
+      <div class="card2" id="mode">
+        <button class="opt" data-v="buy"><span class="radio"></span><span><b>Auto-buy</b><small>The bot holds the seat right away. You get about 12 minutes to pay.</small></span></button>
+        <button class="opt" data-v="notify"><span class="radio"></span><span><b>Notify only</b><small>You get a message and book it yourself.</small></span></button>
+      </div>
+      <div id="paxSection">
+        ${sec(7, "Passengers", "paxSum")}
+        <div class="card2"><div class="pax-top"><span>The bot books in this order.</span><button class="link" id="paxRefresh" type="button" style="font-size:13px">Refresh list</button></div><div id="pax"></div></div>
+        <label class="card2 row" style="margin-top:8px"><span class="inf"><b>Keep everyone together</b><small>Only hold seats when all passengers fit in the same car</small></span>
+          <span class="switch"><input type="checkbox" id="together" aria-label="Keep everyone together"><span></span></span></label>
+      </div>
+      <details class="adv" id="more"><summary>${ms("expand_more", "closed-i")}${ms("expand_less", "open-i")}<b>Advanced</b></summary>
+        <div class="card2 adv-in"><b style="font-weight:600">Check speed</b><div class="seg" id="speed"></div>
+          <p>Faster checks catch more seats, but the railway site may ask the bot to slow down.</p></div></details>
+      <div style="height:24px"></div>`;
 
     // stations
     function stationBox(key, label) {
       const box = $(key === "from" ? "#fromBox" : "#toBox");
       if (d[key]) {
-        box.innerHTML = `<div class="picked"><span>${esc(title(d[key].name))}<small>${label}</small></span>
-          <button class="icon-btn" aria-label="Change ${label}"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>`;
+        box.innerHTML = `<div class="station">${ms("search")}<div><small>${label}</small><button class="st-name picked" aria-label="Change ${label}">${esc(title(d[key].name))}</button></div></div>`;
         box.querySelector("button").onclick = () => { d[key] = null; stationBox(key, label); box.querySelector("input").focus(); validate(); refreshRoute(); };
         return;
       }
-      box.innerHTML = `<label for="st-${key}">${label}</label><input class="input" id="st-${key}"
-        placeholder="${key === "from" ? "e.g. Tashkent" : "e.g. Samarkand"}" autocomplete="off"><div class="suggest" hidden></div>`;
+      box.innerHTML = `<div class="station">${ms("search")}<div><label for="st-${key}"><small>${label}</small></label>
+        <input id="st-${key}" placeholder="${key === "from" ? "Tashkent" : "Samarkand"}" autocomplete="off"></div></div><div class="suggest" hidden></div>`;
       const input = box.querySelector("input"), sug = box.querySelector(".suggest");
       input.addEventListener("keydown", (e) => {
         if (e.key === "Enter") { e.preventDefault(); const first = sug.querySelector("button"); if (first) first.click(); }
@@ -496,10 +805,7 @@
             const other = key === "from" ? d.to : d.from;
             if (other && other.code === s.c) { toast("Pick a different station"); return; }
             d[key] = { code: s.c, name: s.en };
-            haptic();
-            stationBox(key, label);
-            validate();
-            refreshRoute();
+            haptic(); stationBox(key, label); validate(); refreshRoute();
           };
         });
       });
@@ -509,7 +815,6 @@
     $("#swap").onclick = () => { [d.from, d.to] = [d.to, d.from]; stationBox("from", "From"); stationBox("to", "To"); haptic(); validate(); refreshRoute(); };
 
     // calendar
-    const DOW = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
     let picking = false, rangeFrom = "";
     function addDates(list) {
       const all = [...new Set([...d.dates, ...list])].sort();
@@ -523,33 +828,34 @@
     }
     function drawCal() {
       $("#monthName").textContent = month.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
-      $("#rangeBtn").textContent = !picking ? "Pick a range" : rangeFrom ? "Now tap the last day" : "Tap the first day";
+      $("#rangeText").textContent = !picking ? "Pick a range" : rangeFrom ? "Now the last day" : "Tap the first day";
       $("#rangeBtn").setAttribute("aria-pressed", picking);
       const first = (month.getDay() + 6) % 7;
       const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
       const t0 = today(), last = new Date(t0); last.setDate(last.getDate() + 90);
-      let html = DOW.map((x) => `<div class="dow">${x}</div>`).join("");
-      for (let i = 0; i < first; i++) html += "<div></div>";
+      let html = "";
+      for (let i = 0; i < first; i++) html += "<span></span>";
       for (let day = 1; day <= days; day++) {
-        const dt = new Date(month.getFullYear(), month.getMonth(), day);
-        const k = iso(dt);
+        const dt = new Date(month.getFullYear(), month.getMonth(), day), k = iso(dt);
+        const prev = new Date(dt), next = new Date(dt);
+        prev.setDate(day - 1); next.setDate(day + 1);
+        const on = d.dates.includes(k), dow = (dt.getDay() + 6) % 7;
         const off = dt < t0 || dt > last;
-        const cls = ["day", d.dates.includes(k) ? "on" : "", k === iso(t0) ? "today" : ""].join(" ");
+        const cls = ["day-b", on ? "on" : "", k === iso(t0) && !on ? "today" : "", on && dow > 0 && d.dates.includes(iso(prev)) ? "join-l" : "", on && dow < 6 && d.dates.includes(iso(next)) ? "join-r" : ""].join(" ");
         const name = dt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
-        html += `<button class="${cls}" data-d="${k}" aria-label="${name}" aria-pressed="${d.dates.includes(k)}" ${off ? "disabled" : ""}>${day}</button>`;
+        html += `<button class="${cls}" data-d="${k}" aria-label="${name}" aria-pressed="${on}" ${off ? "disabled" : ""}>${day}</button>`;
       }
       $("#cal").innerHTML = html;
-      $("#cal").querySelectorAll(".day:not(:disabled)").forEach((b) => {
+      $("#cal").querySelectorAll(".day-b:not(:disabled)").forEach((b) => {
         b.onclick = () => {
           const k = b.dataset.d;
           if (picking && !rangeFrom) { rangeFrom = k; addDates([k]); }
           else if (picking) { addDates(daysBetween(rangeFrom, k)); picking = false; rangeFrom = ""; }
           else d.dates = d.dates.includes(k) ? d.dates.filter((x) => x !== k) : [...d.dates, k].sort();
-          haptic(); drawCal(); validate(); refreshRoute(); refocus(`.day[data-d="${k}"]`);
+          haptic(); drawCal(); validate(); refreshRoute(); refocus(`.day-b[data-d="${k}"]`);
         };
       });
-      $("#chosen").innerHTML = d.dates.map((x) => `<span class="tag green">${fmtDay(x)}</span>`).join("") ||
-        `<span class="muted">Pick one or more dates.</span>`;
+      $("#dateSum").textContent = d.dates.length ? d.dates.slice(0, 3).map((x) => fmtDay(x)).join(", ") + (d.dates.length > 3 ? ` +${d.dates.length - 3}` : "") : "";
       const prev = new Date(month.getFullYear(), month.getMonth(), 0);
       $("#prevM").disabled = prev < new Date(t0.getFullYear(), t0.getMonth(), 1);
     }
@@ -581,167 +887,131 @@
       const extra = Object.keys(count).filter((c) => !CLASSES.some((k) => k.c === c)).map(classMeta);
       const main = known ? [...CLASSES.filter((k) => count[k.c]), ...extra] : CLASSES;
       const rest = known ? CLASSES.filter((k) => !count[k.c]) : [];
-      const chip = (k) => `<button class="chip ${d.classes.includes(k.c) ? "on" : ""}" data-c="${k.c}" aria-pressed="${d.classes.includes(k.c)}">
-        <span class="check">✓</span>${esc(k.name)}<span class="muted">${esc(k.sub)}${count[k.c] ? ` · ${count[k.c]} train${count[k.c] === 1 ? "" : "s"}` : ""}</span></button>`;
-      $("#classes").innerHTML = main.map(chip).join("");
-      $("#classesOther").innerHTML = rest.map(chip).join("");
+      const tile = (k) => { const on = d.classes.includes(k.c); return `<button class="tile ${on ? "on" : ""}" data-c="${k.c}" aria-pressed="${on}"><div><b>${esc(k.name)}</b><small>${count[k.c] ? `${count[k.c]} train${count[k.c] === 1 ? "" : "s"}` : esc(k.sub)}</small></div>${on ? ms("check") : ""}</button>`; };
+      $("#classes").innerHTML = main.map(tile).join("");
+      $("#classesOther").innerHTML = rest.map(tile).join("");
       $("#otherClasses").hidden = !rest.length;
-      $("#otherCount").textContent = rest.length ? `(${rest.length}, not seen on this route)` : "";
+      $("#otherCount").textContent = `Other classes (${rest.length}, not seen on this route)`;
       if (rest.some((k) => d.classes.includes(k.c))) $("#otherClasses").open = true;
-      document.querySelectorAll("#classes .chip, #classesOther .chip").forEach((b) => {
+      document.querySelectorAll("#classes .tile, #classesOther .tile").forEach((b) => {
         b.onclick = () => {
           const c = b.dataset.c;
           d.classes = d.classes.includes(c) ? d.classes.filter((x) => x !== c) : [...d.classes, c];
-          haptic(); drawClasses(); refocus(`.chip[data-c="${c}"]`);
+          haptic(); drawClasses(); refocus(`.tile[data-c="${c}"]`);
         };
       });
-      const what = !d.from || !d.to ? "Pick the route to see which classes its trains have. "
-        : !TT ? "Loading the timetable… "
-        : known ? `Classes on ${d.trains.length ? "your chosen trains" : "this route"}. ` : "";
-      $("#classHint").textContent = what + (d.classes.length ? `${d.classes.length} selected.` : "Nothing selected means any class.");
+      $("#classSum").textContent = d.classes.length ? `${d.classes.length} chosen` : "Any class";
+      $("#classHint").textContent = !d.from || !d.to ? "Pick the route to see which classes its trains have." : !TT ? "Loading the timetable…" : "";
     }
-    drawClasses();
     const mp = $("#maxPrice");
-    mp.classList.add("has-suffix");
     mp.value = d.maxPrice ? fmtSum(d.maxPrice) : "";
     mp.oninput = () => { const v = mp.value.replace(/\D/g, ""); d.maxPrice = v ? parseInt(v, 10) : 0; };
     mp.onblur = () => { mp.value = d.maxPrice ? fmtSum(d.maxPrice) : ""; };
 
     // mode
     function drawMode() {
-      $("#mode").querySelectorAll("button").forEach((b) => { b.classList.toggle("on", b.dataset.v === d.mode); b.setAttribute("aria-pressed", b.dataset.v === d.mode); });
-      $("#modeHint").textContent = d.mode === "buy"
-        ? "Holds the seats at once and sends you a Pay button (12 minutes to pay)."
-        : "Just sends you a message with the free seats.";
+      $("#mode").querySelectorAll("button").forEach((b) => {
+        const on = b.dataset.v === d.mode;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-pressed", on);
+        b.querySelector(".radio").classList.toggle("on", on);
+      });
       $("#paxSection").hidden = d.mode !== "buy";
       validate();
     }
     $("#mode").querySelectorAll("button").forEach((b) => { b.onclick = () => { d.mode = b.dataset.v; haptic(); drawMode(); }; });
 
     // passengers
+    let adding = false;
     function drawPax() {
       const chosen = d.passengers.filter((p) => S.pax.some((x) => x.i === p));
       d.passengers = chosen;
-      const rows = [...chosen.map((id) => S.pax.find((x) => x.i === id)), ...S.pax.filter((x) => !chosen.includes(x.i))];
+      $("#paxSum").textContent = `${chosen.length} of ${MAX_PAX}`;
       if (!S.pax.length) {
-        $("#pax").innerHTML = S.email && S.hasPw
-          ? `<div class="muted">Your saved passengers aren't on this page yet. Tap <b>↻ Refresh list</b> above:
-             the bot reloads them and sends you a fresh button.<br>
-             No passengers saved? Add them on eticket.uzrailpass.uz → <b>My fellow travelers</b>, then refresh.</div>`
-          : `<div class="muted">Connect your railway account first (the <b>Railway account</b> card on the main
-             page). Your saved passengers ("My fellow travelers" on eticket.uzrailpass.uz) then appear here.</div>`;
+        $("#pax").innerHTML = `<p class="pad">${S.email && S.hasPw ? "Your saved passengers aren't on this page yet. Tap Refresh list. If you have none, add them on eticket.uzrailpass.uz under My fellow travelers, then refresh."
+          : "Connect your railway account first in Settings. Your saved passengers then appear here."}</p>`;
         return;
       }
-      $("#pax").innerHTML = rows.map((p) => {
-        const idx = chosen.indexOf(p.i);
-        const on = idx >= 0;
-        return `<div class="pax-row ${on ? "on" : ""}" data-i="${esc(p.i)}">
-          <button class="pax-pick" type="button" aria-pressed="${on}"${on ? ` aria-label="${esc(p.n)}, priority ${idx + 1}"` : ""}><span class="order" aria-hidden="true">${on ? idx + 1 : ""}</span><span class="name">${esc(p.n)}</span></button>
-          ${on ? `<button class="mini" data-up ${idx === 0 ? "disabled" : ""} aria-label="Move up">▲</button>
-                  <button class="mini" data-down ${idx === chosen.length - 1 ? "disabled" : ""} aria-label="Move down">▼</button>` : ""}
-        </div>`;
-      }).join("");
+      const rest = S.pax.filter((x) => !chosen.includes(x.i));
+      $("#pax").innerHTML = chosen.map((id, i) => `<div class="pax-row" data-i="${esc(id)}"><span class="c">${i + 1}</span><span class="name">${esc(paxName(id))}</span>
+          <button class="icon-btn" data-up ${i === 0 ? "disabled" : ""} aria-label="Move up">${ms("expand_less")}</button>
+          <button class="icon-btn" data-down ${i === chosen.length - 1 ? "disabled" : ""} aria-label="Move down">${ms("expand_more")}</button>
+          <button class="icon-btn" data-rm aria-label="Remove">${ms("close")}</button></div>`).join("") +
+        (rest.length && chosen.length < MAX_PAX ? `<button class="add-p" id="addPax" aria-expanded="${adding}">${ms("add")}Add passenger</button>` : "") +
+        (adding ? rest.map((p) => `<button class="add-p" data-add="${esc(p.i)}" style="color:var(--text)">${esc(p.n)}</button>`).join("") : "");
       $("#pax").querySelectorAll(".pax-row").forEach((row) => {
         const id = row.dataset.i;
-        row.querySelector(".pax-pick").onclick = () => {
-          if (d.passengers.includes(id)) d.passengers = d.passengers.filter((x) => x !== id);
-          else if (d.passengers.length < MAX_PAX) d.passengers.push(id);
-          else { toast(`Up to ${MAX_PAX} passengers per booking`); return; }
-          haptic(); drawPax(); validate(); refocus(`.pax-row[data-i="${CSS.escape(id)}"] .pax-pick`);
-        };
         const move = (dir) => {
           const i = d.passengers.indexOf(id), j = i + dir;
           [d.passengers[i], d.passengers[j]] = [d.passengers[j], d.passengers[i]];
           haptic(); drawPax();
-          refocus(`.pax-row[data-i="${CSS.escape(id)}"] ${dir < 0 ? "[data-up]" : "[data-down]"}:not(:disabled)`) ||
-            refocus(`.pax-row[data-i="${CSS.escape(id)}"] .pax-pick`);
+          refocus(`.pax-row[data-i="${CSS.escape(id)}"] ${dir < 0 ? "[data-up]" : "[data-down]"}:not(:disabled)`) || refocus(`.pax-row[data-i="${CSS.escape(id)}"] [data-rm]`);
         };
-        const up = row.querySelector("[data-up]"), down = row.querySelector("[data-down]");
-        if (up) up.onclick = () => move(-1);
-        if (down) down.onclick = () => move(1);
+        row.querySelector("[data-up]").onclick = () => move(-1);
+        row.querySelector("[data-down]").onclick = () => move(1);
+        row.querySelector("[data-rm]").onclick = () => { d.passengers = d.passengers.filter((x) => x !== id); haptic(); drawPax(); validate(); };
+      });
+      if ($("#addPax")) $("#addPax").onclick = () => { adding = !adding; haptic(); drawPax(); };
+      $("#pax").querySelectorAll("[data-add]").forEach((b) => {
+        b.onclick = () => { d.passengers.push(b.dataset.add); adding = d.passengers.length < MAX_PAX && adding; haptic(); drawPax(); validate(); };
       });
     }
     drawPax();
-    $("#paxRefresh").onclick = () => {
-      confirmThen("Reload your saved passengers? This page closes (unsaved changes here are lost); the bot replies " +
-                  "with the fresh list and a new 🚆 Trips & settings button.", () => send({ a: "pax" }));
-    };
+    $("#paxRefresh").onclick = () => confirmThen("Reload your saved passengers? Unsaved changes on this page are lost, and the bot replies with the fresh list.", () => send({ a: "pax" }));
     $("#together").checked = !!d.together;
     $("#together").onchange = (e) => { d.together = e.target.checked; };
 
     // advanced
-    $("#speed").innerHTML = SPEEDS.map((s) => `<button data-v="${s.v}">${s.label}<br><span class="muted">${s.sub}</span></button>`).join("");
-    function drawSpeed() {
-      $("#speed").querySelectorAll("button").forEach((b) => { b.classList.toggle("on", +b.dataset.v === d.speed); b.setAttribute("aria-pressed", +b.dataset.v === d.speed); b.style.height = "52px"; b.style.lineHeight = "1.2"; });
-      $("#moreSum").textContent = `${SPEEDS.find((s) => s.v === d.speed).label} speed`;
-    }
+    $("#speed").innerHTML = SPEEDS.map((s) => `<button data-v="${s.v}">${s.label} · ${s.sub.replace("every ", "")}</button>`).join("");
+    function drawSpeed() { $("#speed").querySelectorAll("button").forEach((b) => { b.classList.toggle("on", +b.dataset.v === d.speed); b.setAttribute("aria-pressed", +b.dataset.v === d.speed); }); }
     $("#speed").querySelectorAll("button").forEach((b) => { b.onclick = () => { d.speed = +b.dataset.v; haptic(); drawSpeed(); }; });
     drawSpeed();
 
     // trains: every train by default; tap some to watch only those
     let routeKey = d.from && d.to ? d.from.code + ">" + d.to.code : "";
     let showAll = false;
-    const TAG = { "3П": "Plaskart", "2К": "Kupe", "1Л": "SV", "1А": "Lux", "2Е": "Sit eco", "1С": "Sit biz", "2В": "Sit 2nd", "1В": "Sit 1st" };
-    const tag = (c) => TAG[c] || shortClass(c);
     function drawTrains() {
       const key = d.from && d.to ? d.from.code + ">" + d.to.code : "";
       if (key !== routeKey) { d.trains = []; routeKey = key; showAll = false; }   // a new route: back to all trains
       const list = $("#trainList");
-      if (!key) {
-        list.innerHTML = `<p class="placeholder">Pick <b>From</b> and <b>To</b> to see the trains on this route, their times and classes.</p>`;
-        $("#trainCount").textContent = ""; $("#trainHint").textContent = "";
-        return;
-      }
-      if (!TT) { list.innerHTML = `<p class="placeholder">Loading the timetable…</p>`; return; }
+      if (!key) { list.innerHTML = `<p class="pad">Pick From and To to see the trains on this route.</p>`; $("#trainSum").textContent = ""; return; }
+      if (!TT) { list.innerHTML = `<p class="pad">Loading the timetable…</p>`; return; }
       const rows = routeTrains(d.from.code, d.to.code);
       const sameRoute = src && src.from.code === d.from.code && src.to.code === d.to.code;
       for (const [n, dep, arr] of (sameRoute && src.kt) || []) {         // trains the PC saw that the timetable lacks
         if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep, arr, nights: 0, fromDay: 0, r: null, w: null });
       }
       for (const n of d.trains) if (!rows.some((r) => r.n === n)) rows.push({ n, b: "", c: [], dep: "", arr: "", nights: 0, r: null, w: null });
-      // trains that don't run on the chosen dates go last; then by departure time
       const off = (t) => d.dates.length && d.dates.every((x) => runsOn(t, x) === false) ? 1 : 0;
       rows.sort((x, y) => off(x) - off(y) || (x.dep || "99").localeCompare(y.dep || "99"));
-      $("#trainCount").textContent = rows.length ? `· ${rows.length}` : "";
-      if (!rows.length) {
-        list.innerHTML = `<p class="placeholder">No trains for this route in the timetable. Every train is watched, and the bot
-          shows the live list after you save.</p>`;
-        $("#trainHint").textContent = "";
-        return;
-      }
-      const all = !d.trains.length;
-      const LIMIT = 6;
+      const all = !d.trains.length, LIMIT = 6;
+      $("#trainSum").textContent = all ? "Any train" : `${d.trains.length} of ${rows.length}`;
+      if (!rows.length) { list.innerHTML = `<p class="pad">No trains for this route in the timetable. Every train is watched, and the bot shows the live list after you save.</p>`; return; }
       const shown = showAll ? rows : rows.filter((t, i) => i < LIMIT || d.trains.includes(t.n));
-      list.innerHTML = `<button class="train-row all ${all ? "on" : ""}" data-t="*" aria-pressed="${all}"><span class="tick" aria-hidden="true">✓</span>
-          <span class="t-main"><b>All trains</b><small>Watch every train on the route (recommended)</small></span></button>` +
+      list.innerHTML = `<label class="row" style="min-height:52px"><span class="inf"><b>Any train</b></span><span class="switch"><input type="checkbox" id="anyTrain" aria-label="Any train" ${all ? "checked" : ""}><span></span></span></label>` +
         shown.map((t) => {
           const runs = d.dates.map((x) => runsOn(t, x));
-          const no = d.dates.length && runs.every((x) => x === false);
+          const no = d.dates.length && runs.every((x) => x === false) && !d.trains.includes(t.n);
           const some = d.dates.length && !no && runs.some((x) => x === false);
-          const note = no ? `<em class="warn">doesn't run on your ${d.dates.length === 1 ? "date" : "dates"}</em>`
-            : some ? `<em>runs on ${runs.filter((x) => x !== false).length} of ${d.dates.length} dates</em>`
-            : runText(t.r, t.w) ? `<em>${esc(runText(t.r, t.w))}</em>` : "";
-          const cls = t.c.map((c) => `<i>${esc(tag(c))}</i>`).join("");
-          return `<button class="train-row ${d.trains.includes(t.n) ? "on" : ""} ${no ? "dim" : ""}" data-t="${esc(t.n)}" aria-pressed="${d.trains.includes(t.n)}">
-            <span class="tick" aria-hidden="true">✓</span>
-            <span class="t-main"><b>${esc(t.n)}</b><small>${esc(t.b)}</small></span>
-            <span class="t-time">${esc(t.dep || "")}${t.dep ? " → " : ""}${esc(t.arr || "")}${t.nights ? `<sup>+${t.nights}</sup>` : ""}</span>
-            <span class="t-cls">${cls}${note}</span>
-          </button>`;
+          const days = runText(t.r, t.w) || "Daily";
+          const note = no ? "Doesn't run on your dates" : some ? `Runs on ${runs.filter((x) => x !== false).length} of ${d.dates.length} dates` : "";
+          const on = d.trains.includes(t.n);
+          return `<button class="tr-row" data-t="${esc(t.n)}" aria-pressed="${on}" ${no ? "disabled" : ""}><span class="box ${on ? "on" : ""}">${on ? ms("check") : ""}</span>
+            <span class="inf"><span class="t1"><b>${esc(t.n)}</b><span>${esc(t.dep || "")}${t.dep ? " → " : ""}${esc(t.arr || "")}${t.nights ? `<sup>+${t.nights}</sup>` : ""}</span></span>
+            <div class="t2">${esc(days)}${t.c.length ? ` · ${esc(t.c.map(shortClass).join(", "))}` : ""}</div>${note ? `<div class="t3">${note}</div>` : ""}</span></button>`;
         }).join("") +
-        (rows.length > LIMIT ? `<button class="more-trains" data-more type="button">${showAll ? "Show fewer"
-          : `Show all ${rows.length} trains`}</button>` : "");
-      const more = list.querySelector("[data-more]");
-      if (more) more.onclick = () => { showAll = !showAll; drawTrains(); };
-      $("#trainHint").textContent = all
-        ? "From the railway timetable. Live seats are checked after you save."
-        : `Watching only ${d.trains.join(", ")}. Tap All trains to watch every train again.`;
+        (rows.length > LIMIT ? `<button class="more-t" id="moreTrains" type="button">${showAll ? "Show fewer" : `Show all ${rows.length} trains`}</button>` : "");
+      $("#anyTrain").onchange = (e) => {
+        if (e.target.checked) d.trains = [];
+        else toast("Tap the trains you want");
+        haptic(); drawTrains(); drawClasses();
+      };
+      if ($("#moreTrains")) $("#moreTrains").onclick = () => { showAll = !showAll; drawTrains(); };
       list.querySelectorAll("[data-t]").forEach((b) => {
         b.onclick = () => {
           const n = b.dataset.t;
-          if (n === "*") d.trains = [];
-          else d.trains = d.trains.includes(n) ? d.trains.filter((x) => x !== n) : [...d.trains, n];
-          haptic(); drawTrains(); drawClasses(); refocus(`.train-row[data-t="${CSS.escape(n)}"]`);
+          d.trains = d.trains.includes(n) ? d.trains.filter((x) => x !== n) : [...d.trains, n];
+          haptic(); drawTrains(); drawClasses(); refocus(`.tr-row[data-t="${CSS.escape(n)}"]`);
         };
       });
     }
@@ -752,14 +1022,14 @@
     drawMode();
 
     function problems() {
-      if (!d.from || !d.to) return "Choose both stations";
+      if (!d.from || !d.to) return "Choose From and To";
       if (!d.dates.length) return "Pick at least one date";
-      if (d.mode === "buy" && !d.passengers.length) return "Choose at least one passenger";
+      if (d.mode === "buy" && !d.passengers.length) return "Add a passenger";
       return "";
     }
     function validate() {
       const p = problems();
-      setPrimary(p || (src ? "Save changes" : "Start watching"), save, !p);
+      setPrimary(p || "Save trip", save, !p);
     }
     function save() {
       const p = problems();
@@ -769,7 +1039,7 @@
         maxPrice: d.maxPrice || 0, mode: d.mode, passengers: d.mode === "buy" ? d.passengers : [],
         speed: d.speed, trains: d.trains, together: d.together, active: src ? src.active : true,
       };
-      send({ a: "trip", trip });
+      send({ a: "trip", trip }).then((live) => { if (live) { toast("Saved"); closingConfirm(false); tab = "trips"; tripsTab = "active"; render("home"); } });
     }
     validate();
 
@@ -788,31 +1058,24 @@
   }
 
   function renderAccount() {
-    $("#title").textContent = "Railway account";
-    $("#subtitle").textContent = "eticket.uzrailpass.uz login";
     setBack(() => render("home"));
-    app.innerHTML = `
-      <section class="card">
-        <div class="field">
-          <label for="email">Email</label>
-          <input class="input" id="email" type="email" autocomplete="username" placeholder="you@example.com" value="${esc(S.email)}">
-        </div>
-        <div class="field">
-          <label for="pw">Password</label>
-          <div class="input-wrap">
-            <input class="input" id="pw" type="password" autocomplete="current-password" placeholder="${S.hasPw ? "Saved, type to replace" : "Your eticket password"}">
-            <button class="inside" id="eye" aria-label="Show password"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
-          </div>
-        </div>
-        <div class="lock-note">
-          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M7 11V8a5 5 0 0110 0v3M6 11h12v10H6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-          <span>Your password is encrypted on this phone with your PC's key before it is sent, and stored encrypted on your PC only. Passengers come from your saved "fellow travelers" on the railway site.</span>
-        </div>
-      </section>`;
-    $("#eye").onclick = () => { const pw = $("#pw"); pw.type = pw.type === "password" ? "text" : "password"; };
+    app.innerHTML = `<div class="account"><h1 class="page-title">Railway account</h1>
+        <p class="intro">Use the email and password from the railway ticket site. The bot signs in with them to hold seats for you.</p>
+        <label for="email">Email</label>
+        <div class="field"><input id="email" type="email" autocomplete="username" placeholder="you@example.com" value="${esc(S.email)}"></div>
+        <label for="pw">Password</label>
+        <div class="field"><input id="pw" type="password" autocomplete="current-password" placeholder="${S.hasPw ? "Saved, type to replace" : "Your eticket password"}">
+          <button class="icon-btn" id="eye" aria-label="Show password">${ms("visibility")}</button></div>
+        <div class="lock">${ms("lock", "fill")}<span>Your password is encrypted on this phone. It is only sent to the bot on your computer.</span></div></div>`;
+    $("#eye").onclick = () => {
+      const pw = $("#pw"), show = pw.type === "password";
+      pw.type = show ? "text" : "password";
+      $("#eye").innerHTML = ms(show ? "visibility_off" : "visibility");
+      $("#eye").setAttribute("aria-label", show ? "Hide password" : "Show password");
+    };
     const check = () => {
       const ok = /.+@.+\..+/.test($("#email").value.trim()) && $("#pw").value.length > 0;
-      setPrimary("Save and connect", saveAccount, ok);
+      setPrimary("Save", saveAccount, ok);
     };
     $("#email").oninput = check;
     $("#pw").oninput = check;
@@ -833,8 +1096,8 @@
     const dark = inTelegram ? tg.colorScheme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     if (inTelegram) {
-      try { tg.setHeaderColor(dark ? "#182029" : "#ffffff"); tg.setBackgroundColor(dark ? "#0f141b" : "#f3f6fa"); }
-      catch (e) { /* older clients */ }
+      const bg = dark ? "#0D1310" : "#F2F4F1";
+      try { tg.setHeaderColor(bg); tg.setBackgroundColor(bg); } catch (e) { /* older clients */ }
     }
   }
   applyTheme();
@@ -844,4 +1107,6 @@
     try { tg.onEvent("themeChanged", () => { applyTheme(); if (lastPrimary) setPrimary(...lastPrimary); }); } catch (e) { /* older clients */ }
   }
   render(location.hash.includes("v=account") ? "account" : location.hash.includes("v=new") ? "trip" : "home");
+  setInterval(tick, 1000);
+  if (S.live) { pull(); setInterval(pull, 2500); }
 })();

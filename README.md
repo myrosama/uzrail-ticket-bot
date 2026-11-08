@@ -253,8 +253,10 @@ Your settings, railway login, trips and logs live on your computer:
 - macOS: `~/Library/Application Support/UzRailBot`
 - Linux: `~/.local/share/UzRailBot`
 
-The Telegram mini app is a static page (`docs/`, on GitHub Pages) with no server behind it. The desktop window
-talks to the bot only over `127.0.0.1`, with a random key per run.
+The Telegram mini app is a static page (`docs/`, on GitHub Pages). To show live status and carry your taps back to
+the computer, it talks to the bot through a small Cloudflare Worker (`tools/logs-worker`). Everything sent through it
+is encrypted, and the key travels only in your Telegram link, so the Worker can't read it. The desktop window talks to
+the bot only over `127.0.0.1`, with a random key per run.
 
 **Usage logs.** When the app opens or closes, it sends its activity log to the developer, so bugs can be found and
 fixed from real runs. That log has every check of the railway site, every booking step and every error. It has no

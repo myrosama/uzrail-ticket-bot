@@ -77,7 +77,7 @@ assert "Seats reserved" in card["text"] and "left to pay" in card["text"] and ca
 assert quiet["disable_notification"] is True and quiet["reply_markup"]["keyboard"], "the silent line carries the keyboard"
 fragment = quiet["reply_markup"]["keyboard"][0][0]["web_app"]["url"].split("#s=")[1]
 state = json.loads(base64.urlsafe_b64decode(fragment + "=" * (-len(fragment) % 4)))
-assert state["v"] == 2 and state["holds"][0]["pay"] == hold["pay_url"] and state["holds"][0]["t"] == "056Ж", state
+assert state["v"] >= 2 and state["holds"][0]["pay"] == hold["pay_url"] and state["holds"][0]["t"] == "056Ж", state
 assert state["holds"][0]["trip"] == trip["id"] and state["holds"][0]["p"] == [ID_A], "the Mini App needs who holds what"
 store.mark_done(trip["id"], [ID_B])
 assert ID_B in json.loads(base64.urlsafe_b64decode((f := bot.miniapp_url().split("#s=")[1]) + "=" * (-len(f) % 4)))["trips"][0]["done"]
@@ -143,6 +143,25 @@ assert len(by("sendDocument")) == 1 and "couldn't download" in by("sendMessage")
 store.delete_trip(trip["id"])
 assert store.tickets(trip["id"]) == []
 trip = store.upsert_trip(dict(trip))
+
+# ---- live link: encrypted both ways; only fresh, known commands from someone with the key run
+from uzrailbot import remote  # noqa: E402
+live = remote.Remote(store, bot)
+assert remote.unseal(live.key, remote.seal(live.key, {"a": 1})) == {"a": 1}
+ran = []
+bot._webapp, real_webapp = (lambda m: ran.append(json.loads(m["web_app_data"]["data"]))), bot._webapp
+cmd = lambda **k: remote.seal(live.key, {"ts": time.time(), "n": os.urandom(4).hex(), **k})
+assert live.command(cmd(a="pause", on=True)) and ran == [{"a": "pause", "on": True}]
+same = cmd(a="pause", on=False)
+assert live.command(same) and not live.command(same), "the same command must not run twice"
+assert not live.command(cmd(a="account", email="x", pw="y")), "the password never goes over the live link"
+assert not live.command(remote.seal(os.urandom(32), {"a": "pause", "ts": time.time(), "n": "z"})), "wrong key"
+assert not live.command(remote.seal(live.key, {"a": "pause", "ts": time.time() - 3600, "n": "old"})), "too old"
+assert len(ran) == 2
+bot._webapp = real_webapp
+link = live.link()
+assert len(link["i"]) == 32 and "token" not in link, "the link never carries the write token"
+assert remote.Remote(store, bot).id == live.id, "the same PC keeps the same link"
 
 # ---- report a problem: works with sharing off, keeps the normal upload at close
 rec.open()

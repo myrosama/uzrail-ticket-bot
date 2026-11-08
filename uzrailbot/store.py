@@ -24,6 +24,8 @@ CONFIG_DEFAULTS = {
     "auto_update": True,
     "share_logs": True,           # send session logs to the developer (telemetry.py); off in Settings
     "install_id": "",
+    "live": {},                   # id and keys of the Mini App's live link (remote.py)
+    "live_url": "",               # empty = the project's Worker
     "trips": [],
     "transport_key": "",
 }

@@ -16,6 +16,7 @@ import requests
 
 from . import crypto, eticket
 from .classes import CLASSES, label
+from . import telemetry
 from .recorder import rec
 from .store import MAX_PASSENGERS
 
@@ -131,6 +132,7 @@ class Bot:
         self.out = queue.Queue()
         self.wiz = None               # the trip wizard / account dialog in progress
         self.found = {}               # (trip, date) -> message id of the "tickets appeared" note
+        self.remote = None            # the Mini App's live link
         self.stop_ev = threading.Event()
         self.healthy = True
         self.last_error = ""
@@ -140,6 +142,12 @@ class Bot:
         self.engine = engine
         threading.Thread(target=self._sender, name="tg-send", daemon=True).start()
         threading.Thread(target=self._poller, name="tg-poll", daemon=True).start()
+        try:
+            from .remote import Remote
+            self.remote = Remote(self.store, self)
+            self.remote.start()
+        except Exception:                  # the bot must work without the live link
+            log.exception("live link not started")
 
     def stop(self):
         self.stop_ev.set()
@@ -271,11 +279,11 @@ class Bot:
             self._text(msg)
 
     # ---------------------------------------------------------------- keyboards
-    def miniapp_url(self) -> str:
-        """The Mini App link, with the current state in the #fragment (no server needed)."""
+    def miniapp_state(self) -> dict:
+        """What the Mini App shows: sent in its link, and again every few seconds over the live link."""
         email, pw = self.store.railway_login()
         state = {
-            "v": 2, "bot": self.store.cfg["telegram"].get("bot_username", ""), "email": email, "hasPw": bool(pw),
+            "v": 3, "bot": self.store.cfg["telegram"].get("bot_username", ""), "email": email, "hasPw": bool(pw),
             "key": crypto.public_key_b64(self.store.transport_key()),
             "pax": [{"i": p["id"], "n": p["name"]} for p in (self.engine.passenger_list() if self.engine else [])],
             "trips": [dict({k: t[k] for k in ("id", "from", "to", "dates", "classes", "maxPrice", "mode", "passengers",
@@ -286,9 +294,17 @@ class Bot:
                                                                            if self.engine else [])][:12])
                       for t in self.store.trips()],
         }
-        state["holds"] = [{"trip": h["trip"], "p": h["passengers"], "t": h["train"], "c": h["car"], "s": h.get("seats") or [], "f": h["from"], "to": h["to"],
+        state["holds"] = [{"o": h["order"], "cls": h.get("cls"), "dep": h.get("dep"), "arr": h.get("arr"), "st": h.get("seat_types") or [],
+                           "trip": h["trip"], "p": h["passengers"], "t": h["train"], "c": h["car"], "s": h.get("seats") or [], "f": h["from"], "to": h["to"],
                            "d": h.get("date"), "sum": h["total"], "exp": int(h["expires_at"]), "pay": h.get("pay_url") or "",
                            "n": h.get("names") or []} for h in list(self.store.state.get("holds", {}).values())]
+        return state
+
+    def miniapp_url(self) -> str:
+        """The Mini App link, with the current state in the #fragment."""
+        state = self.miniapp_state()
+        if self.remote:
+            state["live"] = self.remote.link()
         raw = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         frag = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
         return self.store.cfg.get("webapp_url", "").rstrip("/") + "/#s=" + frag
@@ -330,6 +346,39 @@ class Bot:
                 elif op.get("a") == "toggle":
                     self.store.set_trip_active(str(op.get("id")), bool(op.get("active")))
             return self.send(f"✅ Saved {len(ops)} change{'' if len(ops) == 1 else 's'} to your trips.", self.main_kb())
+        if act == "pause":
+            self.store.cfg["paused"] = bool(d.get("on"))
+            self.store.save()
+            rec.ev("user_pause" if self.store.cfg["paused"] else "user_resume", source="miniapp")
+            return self.send("⏸ Paused." if self.store.cfg["paused"] else "▶️ Watching again.", self.main_kb())
+        if act == "cancel":
+            oid = str(d.get("order"))
+            h = dict(self.store.state["holds"].get(oid) or {})
+            ok = self.engine.cancel_hold(oid)
+            rec.ev("user_cancel_hold", order=oid, ok=ok)
+            if h.get("msg_id"):
+                self.edit(h["msg_id"], "❌ Cancelled in the Mini App.")
+            return self.send(f"❌ Reservation on train {H(h.get('train', '?'))} cancelled. The seats went back on sale, and I "
+                             "paused that trip so it doesn't grab them again.", self.main_kb())
+        if act == "transfer":
+            oid, frm, to = str(d.get("order")), str(d.get("from")), str(d.get("to"))
+
+            def move():
+                h = dict(self.store.state["holds"].get(oid) or {})
+                ok, msg = self.engine.transfer_hold(oid, frm, to)
+                rec.ev("user_transfer", order=oid, ok=ok, source="miniapp")
+                if h:
+                    name = next((p["name"] for p in self.engine.passenger_list() if p["id"] == to), "?")
+                    self.transfer_done(h, name, ok, msg)
+            threading.Thread(target=move, daemon=True).start()
+            return
+        if act == "report":
+            threading.Thread(target=telemetry.report, args=(self.store, str(d.get("note") or "")), daemon=True).start()
+            return
+        if act in ("sharelogs", "autoupdate"):
+            self.store.cfg["share_logs" if act == "sharelogs" else "auto_update"] = bool(d.get("on"))
+            self.store.save()
+            return
         if act == "tickets":
             threading.Thread(target=self.send_tickets, args=(str(d.get("id")),), daemon=True).start()
             return self.send("📄 Getting your tickets…", self.main_kb())

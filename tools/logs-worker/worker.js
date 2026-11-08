@@ -6,12 +6,18 @@
 // if someone starts flooding it.
 
 const MAX_BYTES = 5 * 1024 * 1024;
+const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, OPTIONS", "cache-control": "no-store" };
 const INSTALL = /^[a-f0-9]{16,64}$/;
 const SESSION = /^(\d{8})-\d{6}$/;
 
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+    const live = url.pathname.match(/^\/live\/([a-f0-9]{32})$/);
+    if (live) {
+      if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+      return env.LIVE.get(env.LIVE.idFromName(live[1])).fetch(req);
+    }
     if (req.method === "POST" && url.pathname === "/upload") return upload(req, env);
     if (req.method === "GET" && url.pathname.startsWith("/admin/")) return admin(req, env, url);
     return new Response("not found", { status: 404 });
@@ -61,4 +67,50 @@ async function admin(req, env, url) {
     return o ? new Response(o.body, { headers: { "content-type": "application/gzip" } }) : new Response("not found", { status: 404 });
   }
   return new Response("not found", { status: 404 });
+}
+
+// Live link between one PC and its Mini App (uzrailbot/remote.py, docs/app.js). Everything stored here is encrypted with a
+// key this Worker never sees. Held in memory only: the PC sends a fresh copy every few seconds.
+export class LiveBox {
+  constructor(state) {
+    this.state = state;
+    this.data = null;
+    this.at = 0;
+    this.viewedAt = 0;
+    this.cmds = [];
+  }
+
+  async fetch(req) {
+    const now = Date.now();
+    if (req.method === "PUT") {                 // the PC: latest status in, waiting commands out
+      const hash = await sha256(req.headers.get("x-live-token") || "");
+      const saved = await this.state.storage.get("token");
+      if (!saved) await this.state.storage.put("token", hash);          // the first PC to use this id owns it
+      else if (saved !== hash) return new Response("forbidden", { status: 403 });
+      const body = await req.text();
+      if (body.length > 512 * 1024) return new Response("too big", { status: 413 });
+      this.data = body;
+      this.at = now;
+      const cmds = this.cmds;
+      this.cmds = [];
+      return Response.json({ viewing: now - this.viewedAt < 10000, cmds });
+    }
+    if (req.method === "POST") {                // the Mini App: a command for the PC
+      const body = await req.text();
+      if (body.length > 16 * 1024 || this.cmds.length >= 20) return new Response("full", { status: 429, headers: CORS });
+      this.cmds.push(body);
+      return new Response(null, { status: 204, headers: CORS });
+    }
+    if (req.method === "GET") {                 // the Mini App: latest status
+      this.viewedAt = now;
+      if (!this.data) return new Response(null, { status: 204, headers: CORS });
+      return Response.json({ age: now - this.at, data: this.data }, { headers: CORS });
+    }
+    return new Response("not found", { status: 404, headers: CORS });
+  }
+}
+
+async function sha256(text) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
