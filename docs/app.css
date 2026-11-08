@@ -109,14 +109,6 @@ body.has-tabs .bottom-bar { bottom: calc(62px + var(--safe-bottom)); }
 .problem .ms { font-size: 22px; flex: none; margin-top: 1px; }
 .problem b { font-weight: 700; }
 .problem p { font-size: var(--fs-callout); color: var(--text-2); line-height: 1.4; margin-top: 2px; }
-.strip { display: flex; gap: 6px; overflow-x: auto; padding: 2px 16px 4px; scrollbar-width: none; }
-.strip::-webkit-scrollbar { display: none; }
-.strip button { flex: none; display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 6px 14px 6px 10px; border: 0; border-radius: var(--r-m); background: var(--surface); text-align: left; }
-.strip .bub { width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-text); display: grid; place-items: center; }
-.strip .bub.off { background: var(--surface-2); color: var(--text-2); }
-.strip .bub .ms { font-size: 16px; }
-.strip b { display: block; font-size: var(--fs-callout); font-weight: 700; white-space: nowrap; }
-.strip small { display: block; font-size: var(--fs-caption); color: var(--text-2); white-space: nowrap; }
 .bar { height: 4px; background: var(--held-soft); }
 .bar.thin { height: 3px; }
 .bar div { height: 100%; background: var(--held); border-radius: 0 2px 2px 0; transition: width 1s linear; }

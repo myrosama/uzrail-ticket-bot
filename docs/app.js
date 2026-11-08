@@ -399,23 +399,15 @@
       bindPause();
       return;
     }
-    const strip = active.map((t) => {
-      const held = holds.filter((h) => h.trip === t.id).reduce((n, h) => n + (h.p || []).length, 0);
-      const left = t.mode === "buy" ? t.passengers.filter((p) => !(t.done || []).includes(p)).length - held : 0;
-      const ds = t.dates.filter((d) => d >= iso(today()));
-      const when = `${ds.slice(0, 3).map((d) => fmtDay(d)).join(", ")}${ds.length > 3 ? ` +${ds.length - 3}` : ""}`;
-      const sub = !t.active ? "Paused" : [held ? `${held} held` : "", left > 0 ? `${left} searching` : ""].filter(Boolean).join(" · ") || (t.mode === "buy" ? "" : "Notify only");
-      return `<button data-go-trips><span class="bub ${t.active ? "" : "off"}">${ms(t.active ? "radar" : "pause", t.active ? "" : "fill")}</span><span><b>${route(t.from.name, t.to.name)}</b><small>${when}${sub ? ` · ${sub}` : ""}</small></span></button>`;
-    }).join("");
-    const heldTrips = S.trips.filter((t) => holds.some((h) => h.trip === t.id) && !isCompleted(t));
-    const n = holds.length;
-    app.innerHTML = statusHtml() + `<div class="strip">${strip}</div>
-      <div class="page-head" style="padding-top:8px"><h1 class="page-title">${n ? `${n} seat${n === 1 ? "" : "s"} held` : "No seats held"}</h1>
-        <p class="lead">${n ? "Pay before the timer ends or the seat goes back on sale." : "The bot holds a seat the moment one appears."}</p></div>
-      ${holds.map((h, i) => i ? holdSmall(h) : holdBig(h)).join("")}
-      ${heldTrips.length ? `<h2 class="h2-sec">Active trip${heldTrips.length === 1 ? "" : "s"}</h2>${heldTrips.map((t) => tripCard(t, holds)).join("")}` : ""}
-      ${boardHtml()}`;
-    app.querySelectorAll("[data-go-trips]").forEach((b) => { b.onclick = () => { tab = "trips"; tripsTab = "active"; window.scrollTo(0, 0); haptic(); renderTab(); }; });
+    // The order on this page: seats to pay for, active trips, then the railway site.
+    const n = holds.length, trips = [...active].sort((a, b) => Number(b.active) - Number(a.active));
+    app.innerHTML = statusHtml() +
+      (n ? `<div class="page-head" style="padding-top:8px"><h1 class="page-title">${n} seat${n === 1 ? "" : "s"} held</h1>
+        <p class="lead">Pay before the timer ends or the seat goes back on sale.</p></div>` : `<h1 class="sr-only">Now</h1>`) +
+      holds.map((h, i) => (i ? holdSmall(h) : holdBig(h))).join("") +
+      (trips.length ? `<h2 class="h2-sec" ${n ? "" : `style="padding-top:8px"`}>Active trip${trips.length === 1 ? "" : "s"}</h2>${trips.map((t) => tripCard(t, holds)).join("")}` : "") +
+      (S.v < 3 ? `<div class="problem warn" style="margin-top:16px">${ms("progress_activity")}<div><b>Restart the bot on your computer</b><p>It's on an older version, so live seats and passenger highlights can't show yet.</p></div></div>` : "") +
+      boardHtml();
     app.querySelectorAll("[data-pay]").forEach((b) => {
       b.onclick = () => {
         if (!/^https:\/\//.test(b.dataset.pay)) return;
