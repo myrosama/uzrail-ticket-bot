@@ -843,6 +843,7 @@ class Engine:
             return False
         h["paid"] = True
         self.store.mark_done(h["trip"], h["passengers"])
+        self.store.add_ticket(h)
         self._drop_hold(oid, "paid")
         rec.ev("paid", order=oid, pdf=True, found_late=True)
         self.ui.paid(h, pdf)
@@ -990,6 +991,7 @@ class Engine:
         if state in PAID_STATES and not h.get("paid"):
             h["paid"] = True
             self.store.mark_done(h["trip"], h["passengers"])
+            self.store.add_ticket(h)
             self._drop_hold(oid, "paid")
             threading.Thread(target=self._deliver_ticket, args=(h,), daemon=True).start()   # retries sleep 45 s
         elif state == "PAYMENT_FAIL":

@@ -94,11 +94,14 @@
 
   // ------------------------------------------------------------------ primary button (Telegram MainButton or our own)
   let primaryHandler = null;
+  let lastPrimary = null;
   function setPrimary(text, handler, enabled = true) {
     primaryHandler = handler;
+    lastPrimary = [text, handler, enabled];
     if (inTelegram) {
       const mb = tg.MainButton;
-      mb.setParams({ text, color: "#00796b", text_color: "#ffffff", is_active: enabled, is_visible: !!handler });
+      const dark = document.documentElement.dataset.theme === "dark";
+      mb.setParams({ text, color: dark ? "#2fd1bb" : "#008577", text_color: dark ? "#06231f" : "#ffffff", is_active: enabled, is_visible: !!handler });
       return;
     }
     const bar = $("#bottomBar"), btn = $("#primaryBtn");
@@ -229,14 +232,27 @@
       ${h.pay ? `<button class="btn btn-primary hold-pay" data-pay="${esc(h.pay)}">Pay ${fmtSum(h.sum)} so'm</button>` : `<p class="hint">The payment link is in the chat.</p>`}
     </article>`;
   function tickHolds() {
+    let expired = false;
     document.querySelectorAll("[data-exp]").forEach((el) => {
       const left = Math.floor(+el.dataset.exp - Date.now() / 1000);
       el.textContent = left > 0 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : "expired";
       const pay = el.closest(".hold").querySelector("[data-pay]");
       if (pay && left <= 0) pay.disabled = true;
+      if (left <= 0) expired = true;
     });
+    if (expired) renderHome();      // the highlight on that passenger's name ends with the hold
   }
   let holdTimer = null;
+  let homeTab = "active";
+  // Completed: every passenger has a paid ticket, or all the dates have passed.
+  const isCompleted = (t) => (t.dates || []).every((d) => d < iso(today())) ||
+    (t.mode === "buy" && t.passengers.length > 0 && t.passengers.every((p) => (t.done || []).includes(p)));
+  // Yellow: this passenger holds a seat on this watch, not paid yet. Lime: paid. Both belong to this one watch.
+  function person(t, p, i, holds) {
+    const st = (t.done || []).includes(p) ? "paid" : holds.some((h) => h.trip === t.id && (h.p || []).includes(p)) ? "held" : "";
+    const say = st === "paid" ? ", ticket paid" : st === "held" ? ", seat held, not paid yet" : "";
+    return `<span class="person ${st}">${st ? `<span aria-hidden="true">✓</span>` : ""}${i + 1}. ${esc(paxName(p))}${say ? `<span class="sr-only">${say}</span>` : ""}</span>`;
+  }
   const guardPending = () => { if (pending.length) { toast("Save your changes first"); return false; } return true; };
 
   function renderHome() {
@@ -280,13 +296,23 @@
     const trips = S.trips;
     $("#tripCount").textContent = trips.length ? `${trips.length}` : "";
     const list = $("#tripList");
-    if (!trips.length) {
+    const completed = trips.filter(isCompleted), active = trips.filter((t) => !isCompleted(t));
+    const shown = homeTab === "completed" ? completed : active;
+    $("#tripTabs").innerHTML = [["active", "Active", active], ["completed", "Completed", completed]]
+      .map(([v, name, l]) => `<button data-v="${v}" class="${homeTab === v ? "on" : ""}" aria-pressed="${homeTab === v}">${name} · ${l.length}</button>`).join("");
+    $("#tripTabs").querySelectorAll("button").forEach((b) => { b.onclick = () => { homeTab = b.dataset.v; haptic(); renderHome(); }; });
+    if (!shown.length && homeTab === "completed") {
+      list.innerHTML = `<div class="card empty"><strong>Nothing completed yet</strong>
+        <p>A trip moves here when every ticket is paid or its dates have passed.</p></div>`;
+    } else if (!shown.length) {
       list.innerHTML = `<div class="card empty">
         <div class="empty-icon"><svg viewBox="0 0 24 24" width="26" height="26"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
         <strong>No trips yet</strong>
         <p>Add a route and dates. The bot watches every second and books the moment seats appear.</p></div>`;
     }
-    for (const t of trips) {
+    for (const t of shown) {
+      const done = isCompleted(t);
+      const q = (act) => el.querySelector(`[data-act="${act}"]`) || {};      // completed cards have fewer buttons
       const future = (t.dates || []).filter((d) => d >= iso(today()));
       const el = document.createElement("article");
       el.className = "card trip";
@@ -305,24 +331,26 @@
             ${t.trains && t.trains.length ? `<span class="tag">Only ${esc(t.trains.join(", "))}</span>` : ""}
             ${t.active ? "" : `<span class="tag amber">Paused</span>`}
           </div>
-          ${t.mode === "buy" ? `<div class="trip-people">${t.passengers.map((p, i) => `${i + 1}. ${esc(paxName(p))}`).join(" · ")}</div>` : ""}
+          ${t.mode === "buy" ? `<div class="trip-people">${t.passengers.map((p, i) => person(t, p, i, holds)).join("")}</div>` : ""}
         </div>
+        ${(t.tk || []).length ? `<div class="trip-tickets">${t.tk.map((x) => `<div>Train ${esc(x.t)} · car ${esc(x.c)} · seat ${esc((x.s || []).join(", ") || "?")}</div>`).join("")}</div>` : ""}
         <div class="trip-actions">
-          <button data-act="edit">Edit</button>
+          ${done ? ((t.tk || []).length ? `<button data-act="get">Get tickets</button>` : "") : `<button data-act="edit">Edit</button>`}
           <button data-act="ret">Return</button>
-          <button data-act="toggle">${t.active ? "Pause" : "Resume"}</button>
+          ${done ? "" : `<button data-act="toggle">${t.active ? "Pause" : "Resume"}</button>`}
           <button data-act="del" class="danger">Delete</button>
         </div>`;
-      el.querySelector('[data-act="edit"]').onclick = () => guardPending() && render("trip", t.id);
-      el.querySelector('[data-act="ret"]').onclick = () => guardPending() && render("trip", { ret: t });
-      el.querySelector('[data-act="toggle"]').onclick = () => {
+      q("get").onclick = () => guardPending() && send({ a: "tickets", id: t.id });
+      q("edit").onclick = () => guardPending() && render("trip", t.id);
+      q("ret").onclick = () => guardPending() && render("trip", { ret: t });
+      q("toggle").onclick = () => {
         if (!canBatch) return send({ a: "toggle", id: t.id, active: !t.active });
         t.active = !t.active;
         const i = pending.findIndex((o) => o.a === "toggle" && o.id === t.id);
         if (i >= 0) pending.splice(i, 1); else pending.push({ a: "toggle", id: t.id, active: t.active });
         haptic(); renderHome();
       };
-      el.querySelector('[data-act="del"]').onclick = () => {
+      q("del").onclick = () => {
         confirmThen("Delete this trip?", () => {
           if (!canBatch) return send({ a: "del", id: t.id });
           S.trips = S.trips.filter((x) => x !== t);
@@ -813,7 +841,7 @@
   if (inTelegram) {
     tg.ready();
     tg.expand();
-    try { tg.onEvent("themeChanged", applyTheme); } catch (e) { /* older clients */ }
+    try { tg.onEvent("themeChanged", () => { applyTheme(); if (lastPrimary) setPrimary(...lastPrimary); }); } catch (e) { /* older clients */ }
   }
   render(location.hash.includes("v=account") ? "account" : location.hash.includes("v=new") ? "trip" : "home");
 })();

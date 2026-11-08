@@ -78,6 +78,13 @@ assert quiet["disable_notification"] is True and quiet["reply_markup"]["keyboard
 fragment = quiet["reply_markup"]["keyboard"][0][0]["web_app"]["url"].split("#s=")[1]
 state = json.loads(base64.urlsafe_b64decode(fragment + "=" * (-len(fragment) % 4)))
 assert state["v"] == 2 and state["holds"][0]["pay"] == hold["pay_url"] and state["holds"][0]["t"] == "056Ж", state
+assert state["holds"][0]["trip"] == trip["id"] and state["holds"][0]["p"] == [ID_A], "the Mini App needs who holds what"
+store.mark_done(trip["id"], [ID_B])
+assert ID_B in json.loads(base64.urlsafe_b64decode((f := bot.miniapp_url().split("#s=")[1]) + "=" * (-len(f) % 4)))["trips"][0]["done"]
+store.delete_trip(trip["id"])
+assert store.done_passengers(trip["id"]) == [], "paid highlights end with the watch"
+trip = store.upsert_trip(dict(trip))
+hold["trip"] = trip["id"]
 
 # ---- a miss removes the note too
 calls.clear()
@@ -124,6 +131,18 @@ msg = {"web_app_data": {"data": json.dumps({"a": "batch", "ops": [{"a": "toggle"
 bot._webapp(msg)
 wait(1)
 assert store.trip(trip["id"])["active"] is False and store.trip(other["id"]) is None and "2 changes" in by("sendMessage")[0]["text"]
+
+# ---- the Completed tab's Get tickets: sends the PDF of each paid order again; tickets end with the watch
+calls.clear()
+bot.engine.client = types.SimpleNamespace(ticket_pdf=lambda order: b"%PDF-1" if order == "UO1" else None)
+store.add_ticket({"trip": trip["id"], "order": "UO1", "train": "056Ж", "car": "10", "seats": ["12"]})
+store.add_ticket({"trip": trip["id"], "order": "UO2", "train": "056Ж", "car": "11", "seats": ["3"]})
+bot.send_tickets(trip["id"])
+wait(2)
+assert len(by("sendDocument")) == 1 and "couldn't download" in by("sendMessage")[0]["text"], calls
+store.delete_trip(trip["id"])
+assert store.tickets(trip["id"]) == []
+trip = store.upsert_trip(dict(trip))
 
 # ---- report a problem: works with sharing off, keeps the normal upload at close
 rec.open()

@@ -280,11 +280,13 @@ class Bot:
             "pax": [{"i": p["id"], "n": p["name"]} for p in (self.engine.passenger_list() if self.engine else [])],
             "trips": [dict({k: t[k] for k in ("id", "from", "to", "dates", "classes", "maxPrice", "mode", "passengers",
                                               "speed", "trains", "together", "active")},
+                           done=self.store.done_passengers(t["id"]),
+                           tk=[{"t": x["train"], "c": x["car"], "s": x["seats"]} for x in self.store.tickets(t["id"])],
                            kt=[[r["number"], r["dep"], r["arr"]] for r in (self.engine.scan_trains(t, fetch=False)
                                                                            if self.engine else [])][:12])
                       for t in self.store.trips()],
         }
-        state["holds"] = [{"t": h["train"], "c": h["car"], "s": h.get("seats") or [], "f": h["from"], "to": h["to"],
+        state["holds"] = [{"trip": h["trip"], "p": h["passengers"], "t": h["train"], "c": h["car"], "s": h.get("seats") or [], "f": h["from"], "to": h["to"],
                            "d": h.get("date"), "sum": h["total"], "exp": int(h["expires_at"]), "pay": h.get("pay_url") or "",
                            "n": h.get("names") or []} for h in list(self.store.state.get("holds", {}).values())]
         raw = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -328,6 +330,9 @@ class Bot:
                 elif op.get("a") == "toggle":
                     self.store.set_trip_active(str(op.get("id")), bool(op.get("active")))
             return self.send(f"✅ Saved {len(ops)} change{'' if len(ops) == 1 else 's'} to your trips.", self.main_kb())
+        if act == "tickets":
+            threading.Thread(target=self.send_tickets, args=(str(d.get("id")),), daemon=True).start()
+            return self.send("📄 Getting your tickets…", self.main_kb())
         if act == "pax":
             return self.refresh_passengers()
         if act == "del":
@@ -344,6 +349,20 @@ class Bot:
             threading.Thread(target=self._check_account, args=(email, password), daemon=True).start()
             return
         self.send("⚠️ Unknown request from the app.", self.main_kb())
+
+    def send_tickets(self, trip_id):
+        """The Completed tab's "Get tickets": send the PDF of every order paid on this watch again."""
+        for x in self.store.tickets(trip_id):
+            try:
+                pdf = self.engine.client.ticket_pdf(x["order"]) if self.engine.client else None
+            except Exception as e:
+                log.info("ticket %s: %s", x["order"], type(e).__name__)
+                pdf = None
+            where = f"train {H(x['train'])}, car {H(x['car'])}, seat {H(', '.join(x['seats']) or '?')}"
+            if pdf:
+                self.send(f"🎟 Your ticket: {where}.", document=pdf, filename=f"ticket-{x['order']}.pdf")
+            else:
+                self.send(f"⚠️ I couldn't download the ticket for {where}. Get it on eticket.uzrailpass.uz → My orders.")
 
     def _check_account(self, email, password):
         c = eticket.Client(email, password)

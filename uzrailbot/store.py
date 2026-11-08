@@ -27,7 +27,7 @@ CONFIG_DEFAULTS = {
     "trips": [],
     "transport_key": "",
 }
-STATE_DEFAULTS = {"holds": {}, "done": {}, "pending": [], "cars": {}, "tg_offset": 0}
+STATE_DEFAULTS = {"holds": {}, "done": {}, "tickets": {}, "pending": [], "cars": {}, "tg_offset": 0}
 
 
 def _merge(defaults: dict, loaded: dict) -> dict:
@@ -207,6 +207,7 @@ class Store:
             before = len(self.cfg["trips"])
             self.cfg["trips"] = [t for t in self.cfg["trips"] if t["id"] != trip_id]
             self.state["done"].pop(trip_id, None)
+            self.state["tickets"].pop(trip_id, None)
             self.save()
             return len(self.cfg["trips"]) != before
 
@@ -223,6 +224,17 @@ class Store:
     def done_passengers(self, trip_id: str) -> list:
         with self.lock:
             return list(self.state["done"].get(trip_id, []))
+
+    def add_ticket(self, h: dict):
+        """Remember a paid order under its watch, so the Mini App's Completed tab can send the PDF again."""
+        with self.lock:
+            self.state["tickets"].setdefault(h["trip"], []).append(
+                {"order": h["order"], "train": h["train"], "car": h["car"], "seats": h.get("seats") or []})
+            self.save()
+
+    def tickets(self, trip_id: str) -> list:
+        with self.lock:
+            return list(self.state["tickets"].get(trip_id, []))
 
     def mark_done(self, trip_id: str, passenger_ids: list):
         with self.lock:

@@ -2,8 +2,9 @@
 :root {
   --green: #08bfa8;                 /* brand accent: logo, borders, focus ring */
   --green-dark: #00796b;            /* green text on light surfaces (5.3:1 on white) */
-  --accent: #00796b;                /* fills behind white text: buttons, selected days (5.3:1) */
-  --accent-hover: #00695c;
+  --accent: #008577;                /* fills behind --on-accent text: buttons, selected days */
+  --accent-hover: #00796b;
+  --on-accent: #ffffff;
   --green-tint: #e8f8f5;
   --green-line: #b8ebe3;
   --bg: #f3f6fa;
@@ -106,7 +107,12 @@ h3, .form-section h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; text
 }
 .tag.green { background: var(--green-tint); color: var(--green-dark); border-color: var(--green-line); }
 .tag.amber { background: var(--amber-tint); color: var(--amber); border-color: var(--amber-line); }
-.trip-people { margin-top: 10px; font-size: 13px; color: var(--ink-2); }
+.trip-people { margin-top: 10px; font-size: 13.5px; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.person { display: inline-flex; gap: 5px; }
+.person.held, .person.paid { padding: 3px 10px; border-radius: 8px; font-weight: 600; }
+.person.held { background: #ffd93d; color: #3a2a00; }
+.person.paid { background: #b4f03a; color: #1c3000; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .trip-actions { display: flex; border-top: 1px solid var(--line); }
 .trip-actions button {
   flex: 1; height: 44px; border: 0; background: transparent;
@@ -131,7 +137,7 @@ h3, .form-section h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; text
   border: 1px solid var(--line-strong); background: var(--card);
   font-weight: 600; font-size: 14.5px;
 }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn-primary:disabled { opacity: .5; cursor: default; }
 .btn-soft { background: var(--green-tint); border-color: transparent; color: var(--green-dark); }
@@ -206,7 +212,7 @@ h3, .form-section h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; text
 }
 .day:hover:not(:disabled) { background: var(--bg); }
 .day.today { box-shadow: inset 0 0 0 1px var(--line-strong); }
-.day.on { background: var(--accent); color: #fff; font-weight: 600; }
+.day.on { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 .day:disabled { color: var(--disabled); cursor: default; }
 .chosen { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 
@@ -245,7 +251,7 @@ h3, .form-section h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; text
   display: grid; place-items: center; font-size: 13px; font-weight: 700;
   border: 1.5px solid var(--line-strong); color: transparent;
 }
-.pax-row.on .order { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pax-row.on .order { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .mini { width: 40px; height: 40px; border: 0; border-radius: 9px; background: transparent; color: var(--ink-2); }
 .mini:disabled { opacity: .3; }
 
@@ -288,6 +294,7 @@ details.more[open] summary { margin-bottom: 12px; }
 /* ---------- theme tokens added in v0.3 + dark mode (follows Telegram's theme) ---------- */
 :root { --amber-line: #f3dfaa; --amber-ink: #7a5600; --disabled: #c6ccd6; }
 :root[data-theme="dark"] {
+  --accent: #2fd1bb; --accent-hover: #4fe0cc; --on-accent: #06231f;
   --green-tint: #0f2f2b; --green-line: #1d5a52; --green-dark: #2fd1bb; --danger: #ff6b6f;
   --bg: #0f141b; --card: #182029; --line: #253041; --line-strong: #33415a;
   --ink: #e8edf4; --ink-2: #b4bfcd; --muted: #94a0b2;
@@ -315,7 +322,7 @@ details.more[open] summary { margin-bottom: 12px; }
 .train-row .t-cls em.warn { color: var(--amber); }
 .train-row.all small { white-space: normal; }
 .train-row.on { border-color: var(--green-line); background: var(--green-tint); }
-.train-row.on .tick { background: var(--accent); border-color: var(--accent); color: #fff; }
+.train-row.on .tick { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 /* doesn't run on the chosen dates: still readable (and tappable), marked by the dashed edge and the amber note */
 .train-row.dim { background: var(--bg); border-style: dashed; }
 .train-row.dim .t-main b, .train-row.dim .t-time { color: var(--ink-2); }
@@ -332,12 +339,16 @@ details.more[open] summary { margin-bottom: 12px; }
 /* ---------- v0.5: held seats, date shortcuts ---------- */
 .section-head.first { margin-top: 0; }
 .section-gap { height: 12px; }
+.hold { background: var(--amber-tint); border-color: var(--amber-line); }
 .hold-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .hold-top .arrow { color: var(--muted); font-weight: 400; }
 .hold-line { margin-top: 6px; font-size: 14px; color: var(--ink-2); }
 .timer { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--amber); }
 .hold-pay { width: 100%; margin-top: 12px; }
 .date-tools { display: flex; gap: 16px; margin-top: 6px; }
+
+.trip-tabs { margin-bottom: 12px; }
+.trip-tickets { padding: 0 16px 12px; font-size: 14px; color: var(--ink-2); display: grid; gap: 4px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
