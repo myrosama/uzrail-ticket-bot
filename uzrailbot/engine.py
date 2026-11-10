@@ -16,8 +16,10 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import parse_qs, urlsplit
 
 from . import eticket
+from .classes import blocks_used, family, sits_together
 from .eticket import EticketError, LoginError, Maintenance, RateLimited
 from .recorder import rec
 
@@ -77,13 +79,17 @@ def match_train(trip: dict, train: dict) -> list:
     return out
 
 
-def pick_seats(places: list, k: int) -> list:
+def pick_seats(places: list, k: int, cls: str = "") -> list:
+    """k free seats to ask for. A booking names a seat range and the railway picks inside it, so only a run of
+    the sorted free seats can be asked for exactly. Best run: the fewest compartments or bays (kupe 4 berths,
+    plaskart 4 + 2 side ones), then the closest numbers."""
     places = sorted(int(p) for p in places)
     best = None
     for i in range(len(places) - k + 1):
-        span = places[i + k - 1] - places[i]
-        if best is None or span < best[0]:
-            best = (span, places[i:i + k])
+        run = places[i:i + k]
+        score = (blocks_used(cls, run), run[-1] - run[0])
+        if best is None or score < best[0]:
+            best = (score, run)
     return best[1] if best else []
 
 
@@ -117,6 +123,7 @@ class Engine:
         self.stuck = {}                # (date, train, cls) -> (time, free): the list shows seats we just failed on
         self.hold_mono = {}            # order id -> monotonic deadline (immune to PC clock changes)
         self.ours = set()              # orders we cancel/replace ourselves (ignore their ORDER_FAILED)
+        self.link_locks = {}           # order id -> lock: one bank page at a time per order
         self.status = {"state": "starting", "detail": "", "last_check": 0.0, "checks": 0,
                        "account": "", "live": False}
         self.board = {}                # (from, to, date) -> what the last check saw: trains, classes, free, price
@@ -569,7 +576,11 @@ class Engine:
             t0 = time.time()
             known = list(self._cars_cache(number, cls, date).items())[:MAX_FANOUT]
             orders = {}                      # order id -> (car, who, path)
-            fan = bool(fresh and known and attempt == 0)
+            # "Keep everyone together" in a sleeping car means one compartment or bay. A blind booking lets the
+            # railway pick any seats in the car (user, 10 Nov: kupe seats 20 and 28), so those trips only book
+            # exact seats from the car lookup.
+            exact_only = trip["together"] and len(party) > 1 and family(cls) in ("kupe", "plaskart", "sv")
+            fan = bool(fresh and known and attempt == 0 and not exact_only)
             if fan:
                 # The most likely car (seen for this date) goes FIRST, on the connection the check just used
                 # (warm, ~50 ms). Measured 2026-11-07: six parallel reserves on fresh connections took ~1 s.
@@ -625,6 +636,11 @@ class Engine:
             if winner:
                 oid, car, who, data, path = winner
                 self._finalize(trip, date, hit, oid, car, who, data, time.time() - t0, path)
+                # the car lookup lags and still lists the seats we now hold: the next passenger must not be aimed
+                # at them (live 9 Nov: every hold was followed by a failed booking of the same seat)
+                for s in (self.store.state["holds"].get(oid) or {}).get("seats") or []:
+                    if str(s).isdigit():
+                        self.bad_seats[(date, number, str(car["number"]), int(s))] = time.time()
                 held.update(str(p["friendId"]) for p in who)
                 party = [p for p in party if str(p["friendId"]) not in held]
                 if not party:
@@ -658,8 +674,9 @@ class Engine:
             time.sleep(0.6)
 
     def _plan(self, groups, cls, trip, party, skip=frozenset()):
-        """Best car for the party: the most passengers seated, then the fullest car; seats close together.
-        skip: {(car number, seat)} that just failed to book."""
+        """Best car for the party: the most passengers seated, then the fewest compartments, then the fullest car.
+        With "together" on, only a car where the whole party fits one compartment or bay (sitting cars: one car).
+        skip: {(car number, seat)} that just failed to book or that we hold."""
         best = None
         for g in groups or []:
             if trip["maxPrice"] and int(g.get("tariff") or 0) > trip["maxPrice"]:
@@ -670,12 +687,13 @@ class Engine:
                 if service != cls or not places:
                     continue
                 n = min(len(party), len(places))
-                if trip["together"] and n < len(party):
+                seats = pick_seats(places, n, service)
+                if trip["together"] and (n < len(party) or not sits_together(service, seats)):
                     continue
-                score = (n, -len(places))
+                score = (n, -blocks_used(service, seats), -len(places))
                 if best is None or score > best[0]:
                     best = (score, {"number": str(car["number"]), "carType": g.get("type"), "service": service},
-                            pick_seats(places, n), party[:n])
+                            seats, party[:n])
         return best[1:] if best else None
 
     def _reserve(self, trip, hit, car, seats_range, who):
@@ -785,16 +803,35 @@ class Engine:
         bot = self.store.cfg["telegram"].get("bot_username") or ""
         ok = f"https://t.me/{bot}?start=paid_{hold['order']}" if bot else eticket.BASE
         bad = f"https://t.me/{bot}?start=payfail_{hold['order']}" if bot else eticket.BASE
-        for attempt in range(attempts):
-            try:
-                t0 = time.perf_counter()
-                hold["psid"], hold["pay_url"] = eticket.make_pay_link(self.client, self.live, hold["order"], ok, bad)
-                rec.ev("pay_link", order=hold["order"], ms=round((time.perf_counter() - t0) * 1000))
+        # Two requests for one order (two taps on "new link", or a tap during the first try) must not make two
+        # bank pages: the later one could end the earlier one while we still show it.
+        with self.link_locks.setdefault(hold["order"], threading.Lock()):
+            if hold.get("pay_url") and time.time() - hold.get("link_at", 0) < 5:
                 return True
-            except EticketError as e:
-                rec.ev("pay_link_fail", order=hold["order"], attempt=attempt + 1, error=str(e)[:200])
-                time.sleep(1)
-        return False
+            for attempt in range(attempts):
+                try:
+                    t0 = time.perf_counter()
+                    hold["psid"], hold["pay_url"] = eticket.make_pay_link(self.client, self.live, hold["order"], ok, bad)
+                    hold["link_at"] = time.time()
+                    hold.pop("link_dead", None)
+                    u = urlsplit(hold["pay_url"])
+                    rec.ev("pay_link", order=hold["order"], ms=round((time.perf_counter() - t0) * 1000),
+                           host=u.netloc, params=sorted(parse_qs(u.query)))
+                    return True
+                except EticketError as e:
+                    rec.ev("pay_link_fail", order=hold["order"], attempt=attempt + 1, error=str(e)[:200])
+                    time.sleep(1)
+            return False
+
+    def _check_pay_link(self, h):
+        """The bank's page can stop working while the railway still holds the seat (users met dead Pay links on
+        9 and 10 Nov and cancelled good holds to get a new one). Asked once a minute. When the bank says the page
+        is gone, the Pay button becomes "Get a new payment link". Not renewed by itself: a new page for an order
+        somebody is paying right now could break that payment."""
+        if h.get("pay_url") and eticket.pay_link_dead(h["pay_url"]):
+            rec.ev("pay_link_dead", order=h["order"], age_s=round(time.time() - h["link_at"]) if h.get("link_at") else None)
+            h["pay_url"], h["link_dead"] = "", True
+            self.store.save()
 
     # ---------------------------------------------------------------- holds: countdown, expire, paid
     def _pay_link_later(self, oid):
@@ -826,6 +863,7 @@ class Engine:
                         self.ui.expired(h)
                     elif time.time() - h.get("last_update", 0) >= HOLD_UPDATE_EVERY:
                         h["last_update"] = time.time()
+                        self._check_pay_link(h)
                         self.ui.hold_update(h)
             except Exception:
                 log.exception("hold loop")

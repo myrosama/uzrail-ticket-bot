@@ -221,6 +221,7 @@
         <div class="row-btns">
           <button class="btn danger sm" data-cancel="${esc(h.order)}">Cancel</button>
           <button class="btn ghost sm" data-xfer-open="${esc(h.order)}">Transfer</button>
+          <button class="btn ghost sm" data-paylink="${esc(h.order)}">New pay link</button>
           ${h.pay_url ? `<button class="btn primary sm" data-open="${esc(h.pay_url)}">Pay ${fmtSum(h.total)} so'm</button>` : ""}
         </div>
       </div>`;
@@ -253,6 +254,11 @@
     refresh();
   });
   $("#holds").addEventListener("click", async (e) => {
+    const p = e.target.closest("[data-paylink]");
+    if (p) {
+      const r = await api("/api/paylink", { order: p.dataset.paylink });
+      return toast(r.ok ? "Getting a new payment link. It replaces the Pay button here and in Telegram." : "Could not ask for a new link.");
+    }
     const b = e.target.closest("[data-cancel]");
     if (!b || !confirm("Cancel this reservation? The seats go back on sale and the trip is paused.")) return;
     const r = await api("/api/cancel", { order: b.dataset.cancel });
@@ -304,7 +310,7 @@
           ${t.classes.map((c) => `<span class="tag">${esc(cls(c))}</span>`).join("") || '<span class="tag">Any class</span>'}
           <span class="tag">${t.maxPrice ? `up to ${fmtSum(t.maxPrice)} so'm` : "Any price"}</span>
           <span class="tag">${t.trains && t.trains.length ? `Only train ${esc(t.trains.join(", "))}` : "All trains"}</span>
-          ${multi ? `<span class="tag">${t.together ? "Together in one car" : "May be split"}</span>` : ""}
+          ${multi ? `<span class="tag">${t.together ? "Together in one compartment" : "May be split"}</span>` : ""}
         </div>
         ${pax ? `<ol class="pax">${pax}</ol>` : ""}
         <div class="trip-foot">

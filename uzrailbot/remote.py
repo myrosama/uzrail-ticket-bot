@@ -27,7 +27,7 @@ WORKER = "https://uzrail-logs.sadrikov49.workers.dev/live/"
 VIEWING, IDLE, OFFLINE = 2, 10, 30         # seconds between updates: Mini App open, closed, no internet
 MAX_AGE = 300                              # a command older than this is ignored
 COMMANDS = {"trip", "toggle", "del", "batch", "pax", "tickets", "pause", "cancel", "transfer", "report", "sharelogs",
-            "autoupdate"}                  # the railway password never goes this way
+            "autoupdate", "paylink", "paytap"}     # the railway password never goes this way
 QUIET = {"check", "http", "ws", "heartbeat", "session_start", "notify", "plan", "miniapp"}
 
 log = logging.getLogger("uzrailbot.remote")

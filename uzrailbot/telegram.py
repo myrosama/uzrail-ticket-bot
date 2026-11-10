@@ -283,7 +283,7 @@ class Bot:
         """What the Mini App shows: sent in its link, and again every few seconds over the live link."""
         email, pw = self.store.railway_login()
         state = {
-            "v": 3, "bot": self.store.cfg["telegram"].get("bot_username", ""), "email": email, "hasPw": bool(pw),
+            "v": 4, "bot": self.store.cfg["telegram"].get("bot_username", ""), "email": email, "hasPw": bool(pw),
             "key": crypto.public_key_b64(self.store.transport_key()),
             "pax": [{"i": p["id"], "n": p["name"]} for p in (self.engine.passenger_list() if self.engine else [])],
             "trips": [dict({k: t[k] for k in ("id", "from", "to", "dates", "classes", "maxPrice", "mode", "passengers",
@@ -379,6 +379,12 @@ class Bot:
             self.store.cfg["share_logs" if act == "sharelogs" else "auto_update"] = bool(d.get("on"))
             self.store.save()
             return
+        if act == "paylink":
+            threading.Thread(target=self.new_link, args=(str(d.get("order")),), daemon=True).start()
+            return
+        if act == "paytap":           # Pay was tapped in the Mini App: a log then shows a pay page that didn't work
+            rec.ev("pay_opened", order=str(d.get("order")), source="miniapp")
+            return
         if act == "tickets":
             threading.Thread(target=self.send_tickets, args=(str(d.get("id")),), daemon=True).start()
             return self.send("📄 Getting your tickets…", self.main_kb())
@@ -398,6 +404,18 @@ class Bot:
             threading.Thread(target=self._check_account, args=(email, password), daemon=True).start()
             return
         self.send("⚠️ Unknown request from the app.", self.main_kb())
+
+    def new_link(self, oid):
+        """A fresh bank page for a held seat, for when the old one stopped working. May take a few seconds."""
+        h = self.engine.new_pay_link(oid)
+        rec.ev("user_new_pay_link", order=oid, ok=bool(h))
+        if not h:
+            return self.send("⚠️ I couldn't get a new payment link. The hold may have ended, or the bank isn't "
+                             "answering. Try again in a moment.")
+        h["last_update"] = time.time()
+        self.hold_update(h)                       # the Pay button on the reservation message opens the new page
+        self.send("🔁 New payment link ready. Tap <b>Pay</b> on the reservation message.",
+                  None if h.get("msg_id") else self._hold_kb(h))
 
     def send_tickets(self, trip_id):
         """The Completed tab's "Get tickets": send the PDF of every order paid on this watch again."""
@@ -605,7 +623,7 @@ class Bot:
         trains = ("only train " + ", ".join(H(n) for n in t["trains"])) if t.get("trains") else "all trains"
         group = ""
         if t["mode"] == "buy" and len(t.get("passengers", [])) > 1:
-            group = ("\n👥 everyone in one car, or nobody" if t.get("together")
+            group = ("\n👥 everyone together (one compartment or bay), or nobody" if t.get("together")
                      else "\n👥 may split across cars, classes or trains (first passengers first)")
         return (f"🚆 <b>{H(t['from']['name'].title())} → {H(t['to']['name'].title())}</b>\n📅 {dates}\n"
                 f"🎫 {cls}, {price} · {trains}\n"
@@ -637,9 +655,7 @@ class Bot:
         elif kind in ("xfer", "xfrom", "xto", "xgo", "xback"):
             self._transfer_cb(kind, arg, mid)
         elif kind == "paylink":
-            h = self.engine.new_pay_link(arg)
-            self.send("🔁 New payment link ready." if h else "Couldn't make a new link; the hold may have ended.",
-                      self._hold_kb(h) if h else None)
+            threading.Thread(target=self.new_link, args=(arg,), daemon=True).start()
         elif kind == "tpause":
             self.store.set_trip_active(arg, False)
             self.show_trips(mid)
@@ -938,13 +954,12 @@ class Bot:
 
     # ---------------------------------------------------------------- engine notifications
     def _hold_kb(self, h):
-        rows = []
-        if h.get("pay_url"):
-            rows.append([{"text": f"💳 Pay {fmt_sum(h['total'])} so'm", "url": h["pay_url"]}])
-        else:
-            rows.append([{"text": "🔁 Get a payment link", "callback_data": f"paylink:{h['order']}"}])
-        rows.append([{"text": "🔄 Transfer", "callback_data": f"xfer:{h['order']}"},
-                     {"text": "❌ Cancel", "callback_data": f"cancel:{h['order']}"}])
+        new = {"text": "🔁 Get a payment link", "callback_data": f"paylink:{h['order']}"}
+        rows = [[{"text": f"💳 Pay {fmt_sum(h['total'])} so'm", "url": h["pay_url"]}] if h.get("pay_url") else [new],
+                [{"text": "🔄 Transfer", "callback_data": f"xfer:{h['order']}"},
+                 {"text": "❌ Cancel", "callback_data": f"cancel:{h['order']}"}]]
+        if h.get("pay_url"):        # the bank page can stop working: a new one beats cancelling a good hold
+            rows.append([dict(new, text="🔁 Pay page not opening? New link")])
         return {"inline_keyboard": rows}
 
     def _transfer_cb(self, kind, arg, mid):
@@ -1027,7 +1042,9 @@ class Bot:
         left = h["expires_at"] - time.time()
         until = time.strftime("%H:%M", time.localtime(h["expires_at"]))
         return (self._hold_text(h) + f"\n\n⏳ <b>{fmt_left(left)}</b> left to pay (until {until}). Not paid in time: "
-                "the seats go back on sale and I start searching again.")
+                "the seats go back on sale and I start searching again."
+                + ("\n\n⚠️ The bank closed its payment page. Tap <b>Get a payment link</b> for a new one."
+                   if h.get("link_dead") else ""))
 
     def reserved(self, h):
         # One card with everything; the "tickets appeared" note goes away. A silent line follows because only a

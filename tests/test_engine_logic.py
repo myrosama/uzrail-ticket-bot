@@ -25,6 +25,16 @@ assert match_train(dict(trip, trains=["058З"]), train) == []
 assert pick_seats(["3", "10", "11", "12", "40"], 3) == [10, 11, 12]
 assert pick_seats(["5"], 2) == []
 
+# ---- together means one kupe compartment (4 berths) or one plaskart bay (4 + 2 side berths), not just one car
+from uzrailbot.classes import seat_block, sits_together  # noqa: E402
+assert pick_seats(["4", "5", "6", "20"], 2, "2К") == [5, 6], "4 and 5 are next to each other by number, but in two compartments"
+assert not sits_together("2К", [20, 28]) and sits_together("2К", [17, 20]), "the user's case: kupe seats 20 and 28"
+assert seat_block("3П", 53) == seat_block("3П", 1) == 0 and seat_block("3П", 37) == seat_block("3П", 36) == 8, \
+    "plaskart side berths are numbered from the far end"
+assert sits_together("3П", [35, 36, 37]) and not sits_together("3П", [4, 5])
+assert sits_together("2Е", [3, 40]), "sitting cars have no compartments: one car is all we can tell"
+assert sits_together("1Л", [1, 2, 3, 4]) and not sits_together("1Л", [1, 2, 7, 8]), "4 people in SV: two neighbouring compartments"
+
 # ---- request budget: one pause for parallel 429s; repeated 429s double the pause; a normal answer resets it
 b = eticket._Budget()
 R = eticket.RESERVE_PATH
@@ -136,6 +146,95 @@ eng.booking_pax.add("1")
 assert eng._remaining(t) == [], "a passenger being booked by another trip must be skipped"
 eng.booking_pax.clear()
 assert eng._remaining(t) == ["1"]
+
+# ---- together: a car where the party would sit in two compartments is skipped, and nothing is booked blind
+def kupe(*cars):
+    return [{"type": "КУПЕ", "tariff": 348550,
+             "cars": [{"number": n, "schema": {"service": "2К"}, "places": p} for n, p in cars]}]
+
+
+two = [dict(person, friendId=1), dict(person, friendId=2)]
+rule = {"maxPrice": 0, "together": True}
+assert eng._plan(kupe(("05", ["20", "28"])), "2К", rule, two) is None
+assert eng._plan(kupe(("05", ["20", "28"]), ("07", ["9", "10", "30"])), "2К", rule, two)[:2] == \
+    ({"number": "07", "carType": "КУПЕ", "service": "2К"}, [9, 10])
+assert eng._plan(kupe(("05", ["20", "28"])), "2К", dict(rule, together=False), two)[1] == [20, 28], "switch off: a split still books"
+
+
+class RangeClient(FakeClient):
+    def __init__(self, places):
+        super().__init__()
+        self.places, self.ranges = places, []
+
+    def cars(self, *a):
+        return kupe(("05", self.places))
+
+    def reserve(self, payload):
+        self.ranges.append(payload["subItems"][0]["reserveSeatRequirements"]["seatsRange"])
+        return super().reserve(payload)
+
+
+tk = store.upsert_trip({"from": {"code": "2900790", "name": "URGENCH"}, "to": {"code": "2900002", "name": "TASHKENT"},
+                        "dates": ["2099-11-08"], "classes": ["2К"], "passengers": ["1", "2"], "mode": "buy", "together": True})
+store.state["cars"]["056Ж|2К|2099-11-08"] = {"05": {"carType": "КУПЕ", "service": "2К"}}     # a car the fan-out would use
+hit2 = {"number": "056Ж", "cls": "2К", "price": 348550, "free": 2, "train": train}
+eng.stuck.clear()
+eng.bad_seats.clear()
+eng.client = RangeClient(["20", "28"])
+eng._book_hit(tk, "2099-11-08", hit2, two, fresh=True)
+assert eng.client.ranges == [], f"seats in two compartments must not be booked, sent {eng.client.ranges}"
+eng.client = RangeClient(["17", "18", "28"])
+eng._book_hit(tk, "2099-11-08", hit2, two, fresh=True)
+assert eng.client.ranges == ["17-18"], f"one exact booking inside the compartment, sent {eng.client.ranges}"
+store.state["cars"].clear()
+
+
+# ---- after a hold, the next passenger is not aimed at the seat we just took (the car lookup still lists it)
+class HeldLive(FakeLive):
+    def seen(self, pred, since=0):
+        first = FakeClient.last == "UO1"
+        ev = {"state": "PAYMENT_STARTED" if first else "ORDER_FAILED", "_t": time.time(),
+              "data": {"orderId": FakeClient.last, "items": [{"tickets": [{"seatNumber": "025", "seatType": "Н"}]}] if first else []}}
+        return ev if pred(ev) else None
+
+
+eng.stuck.clear()
+eng.bad_seats.clear()
+eng.client, eng.live = FakeClient(), HeldLive()
+eng.client.seconds_left = lambda oid: 700
+eng._attach_pay_link = lambda hold, attempts=3: True
+t2 = store.upsert_trip({"from": {"code": "2900790", "name": "URGENCH"}, "to": {"code": "2900002", "name": "TASHKENT"},
+                        "dates": ["2099-11-08"], "classes": ["3П"], "passengers": ["1", "2"], "mode": "buy"})
+got = eng._book_hit(t2, "2099-11-08", hit, two, fresh=False)
+assert got == {"1"} and store.state["holds"]["UO1"]["seats"] == ["25"], got
+assert eng.client.reserves == 1, f"the held seat was aimed at again: {eng.client.reserves} bookings sent"
+store.state["holds"].clear()
+del eng._attach_pay_link
+
+# ---- pay links: a page the bank reports gone comes off the hold; two requests at once make one bank page
+h = {"order": "UOP", "pay_url": "https://acq-invoice.hamkorbank.uz/?key=k&inv_type=4", "link_at": time.time() - 400}
+real_dead, real_make = eticket.pay_link_dead, eticket.make_pay_link
+eticket.pay_link_dead = lambda url: False
+eng._check_pay_link(h)
+assert h["pay_url"], "a link the bank still knows stays"
+eticket.pay_link_dead = lambda url: True
+eng._check_pay_link(h)
+assert h["pay_url"] == "" and h["link_dead"], "a dead link must not stay on the Pay button"
+made = []
+
+
+def slow_link(client, live, oid, ok, bad):
+    made.append(oid)
+    time.sleep(0.05)
+    return "P", "https://bank.example/?key=1"
+
+
+eticket.make_pay_link = slow_link
+both = [threading.Thread(target=eng._attach_pay_link, args=(h,)) for _ in range(2)]
+[x.start() for x in both]
+[x.join() for x in both]
+assert made == ["UOP"] and h["pay_url"] == "https://bank.example/?key=1" and "link_dead" not in h, made
+eticket.pay_link_dead, eticket.make_pay_link = real_dead, real_make
 
 eng.stop()
 print("engine logic: all checks passed")

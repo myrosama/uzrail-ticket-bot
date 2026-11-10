@@ -273,6 +273,10 @@ class App:
                 self._tell(f"❌ You cancelled the reservation on train {h.get('train')} in the PC app. The seats went back "
                            "on sale, and I paused that trip so it doesn't grab them again.")
             return {"ok": ok}
+        if path == "/api/paylink":
+            if self.bot:
+                threading.Thread(target=self.bot.new_link, args=(str(body.get("order")),), daemon=True).start()
+            return {"ok": bool(self.bot)}
         if path == "/api/autostart":
             autostart.set_enabled(bool(body.get("on")))
             return {"ok": True, "on": autostart.is_enabled()}

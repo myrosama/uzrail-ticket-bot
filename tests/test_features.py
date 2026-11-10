@@ -144,8 +144,59 @@ store.delete_trip(trip["id"])
 assert store.tickets(trip["id"]) == []
 trip = store.upsert_trip(dict(trip))
 
+# ---- pay links: the card always offers a new link; asking for one updates the card in place
+from uzrailbot import eticket  # noqa: E402
+kb = bot._hold_kb(hold)["inline_keyboard"]
+assert kb[0][0]["url"] == hold["pay_url"] and kb[-1][0]["callback_data"] == "paylink:" + hold["order"], kb
+assert bot._hold_kb(dict(hold, pay_url=""))["inline_keyboard"][0][0]["callback_data"] == "paylink:" + hold["order"]
+assert "bank closed its payment page" in bot._pay_text(dict(hold, pay_url="", link_dead=True)) and "bank closed" not in bot._pay_text(hold)
+calls.clear()
+store.state["holds"][hold["order"]] = dict(hold, pay_url="")
+bot.engine.new_pay_link = lambda oid: store.state["holds"][oid].update(pay_url="https://pay.example/new") or store.state["holds"][oid]
+bot._webapp({"web_app_data": {"data": json.dumps({"a": "paylink", "order": hold["order"]})}})
+wait(2)
+edit = by("editMessageText")[0]
+assert edit["message_id"] == 99 and edit["reply_markup"]["inline_keyboard"][0][0]["url"] == "https://pay.example/new", edit
+assert "New payment link ready" in by("sendMessage")[0]["text"]
+calls.clear()
+bot.engine.new_pay_link = lambda oid: None
+bot.new_link(hold["order"])
+wait(1)
+assert "couldn't get a new payment link" in by("sendMessage")[0]["text"]
+
+# ---- the bank check: only a clear "gone" from the bank counts; no answer never takes the Pay button away
+BANK_LINK = "https://acq-invoice.hamkorbank.uz/?key=aaaaaaaa-1111-1111-1111-111111111111&inv_type=4"
+real_get = eticket.requests.get
+answer = [{"status": "Failure", "error_code": -30, "error_note": "1056 Url is expired", "data": None}]
+eticket.requests.get = lambda url, timeout=0: types.SimpleNamespace(json=lambda: answer[0])
+assert eticket.pay_link_dead(BANK_LINK) is True
+answer[0] = {"status": "Failure", "error_code": -30, "error_note": "sql: no rows in result set", "data": None}
+assert eticket.pay_link_dead(BANK_LINK) is True
+answer[0] = {"status": "Success", "data": {"amount": 1}}
+assert eticket.pay_link_dead(BANK_LINK) is False
+answer[0] = {"status": "Failure", "error_note": "something new"}
+assert eticket.pay_link_dead(BANK_LINK) is False, "an answer we don't know is not proof the page is gone"
+assert eticket.pay_link_dead("https://pay.example/x") is False, "another kind of link is never called dead"
+
+
+def no_bank(url, timeout=0):
+    raise eticket.requests.ConnectionError("down")
+
+
+eticket.requests.get = no_bank
+assert eticket.pay_link_dead(BANK_LINK) is False
+eticket.requests.get = real_get
+
+# ---- the link is written the way browsers write it ("/" before "?")
+events = [{"state": "SELECT_PAYMENT_SUCCEEDED", "data": {"orderId": "UO9", "paymentSystemId": "P"}},
+          {"state": "PREPARE_PAYMENT_SUCCEEDED", "data": {"orderId": "UO9", "payUrl": "https://acq-invoice.hamkorbank.uz?key=k&inv_type=4"}}]
+fake_client = types.SimpleNamespace(select_payment=lambda oid, kind: None, hamkor_prepare=lambda psid, ok, bad: None)
+fake_live = types.SimpleNamespace(wait_for=lambda pred, timeout, since=0: next((e for e in events if pred(e)), None))
+assert eticket.make_pay_link(fake_client, fake_live, "UO9", "ok", "bad") == ("P", "https://acq-invoice.hamkorbank.uz/?key=k&inv_type=4")
+
 # ---- live link: encrypted both ways; only fresh, known commands from someone with the key run
 from uzrailbot import remote  # noqa: E402
+assert {"paylink", "paytap"} <= remote.COMMANDS
 live = remote.Remote(store, bot)
 assert remote.unseal(live.key, remote.seal(live.key, {"a": 1})) == {"a": 1}
 ran = []

@@ -606,4 +606,22 @@ def make_pay_link(client: Client, live: Live, order_id: str, success_url: str, f
                        timeout, since=t0)
     if not ev or not (ev.get("data") or {}).get("payUrl"):
         raise EticketError("the bank page was not prepared")
-    return psid, ev["data"]["payUrl"]
+    # the railway sends "https://host?key=..." with no "/" before the "?": write it the way browsers do
+    return psid, re.sub(r"^(https?://[^/?#]+)\?", r"\1/?", ev["data"]["payUrl"])
+
+
+BANK_INVOICE = "https://acq.hamkorbank.uz/api/v1/ecomm/payments/invoice/"
+
+
+def pay_link_dead(url: str, timeout: float = 4) -> bool:
+    """Ask the bank whether its payment page is gone: the request the page itself makes when it opens. True only
+    when the bank says so ("Url is expired", or it doesn't know the key). Any other answer, or none, is alive."""
+    m = re.search(r"[?&]key=([0-9a-fA-F-]{36})(?:&|$)", url or "")
+    if not m or "hamkorbank" not in url:
+        return False
+    try:
+        j = requests.get(BANK_INVOICE + m.group(1), timeout=timeout).json()
+    except (requests.RequestException, ValueError):
+        return False
+    note = str(j.get("error_note") or "").lower() if isinstance(j, dict) else ""
+    return bool(note) and j.get("status") == "Failure" and ("expired" in note or "no rows" in note)

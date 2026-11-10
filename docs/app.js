@@ -85,7 +85,7 @@
   }
 
   /* Over the live link when connected (the page stays open; returns true), otherwise through the chat. */
-  async function send(payload) {
+  async function send(payload, liveOnly) {
     if (liveOn && payload.a !== "account") {
       try {
         const n = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -93,6 +93,7 @@
         if (r.ok) return true;
       } catch (e) { /* the chat below still works */ }
     }
+    if (liveOnly) return false;
     const data = JSON.stringify(payload);
     if (data.length > 4000) { toast("Too much data for one save. Remove some dates."); return; }
     if (inTelegram) { closingConfirm(false); tg.sendData(data); return; }   // closes the Mini App; the bot replies
@@ -349,18 +350,23 @@
           <div><small>Seat</small><b>${(h.s || []).length === 1 ? `${esc(h.s[0])} ${BERTH((h.st || [])[0])}` : esc((h.s || []).join(", "))}</b></div>
           <div><small>Class</small><b>${h.cls ? esc(shortClass(h.cls)) : ""}</b></div></div>
         <div class="who"><span>${esc(initials((h.n || [])[0]))}</span><div><b>${esc(who)}</b>${pos ? `<small>Passenger ${pos} of ${trip.passengers.length}</small>` : ""}</div></div>
-        ${h.pay ? `<button class="btn primary big pay-big" data-pay="${esc(h.pay)}">Pay ${fmtSum(h.sum)} so'm${ms("arrow_forward")}</button>` : `<p class="hint" style="padding:14px 0 0">The payment link is on its way.</p>`}
+        ${h.pay ? `<button class="btn primary big pay-big" data-pay="${esc(h.pay)}">Pay ${fmtSum(h.sum)} so'm${ms("arrow_forward")}</button>`
+          : S.v >= 4 && h.o ? `<button class="btn primary big pay-big" data-relink>Get a payment link</button>` : `<p class="hint" style="padding:14px 0 0">The payment link is on its way.</p>`}
         ${S.v >= 3 && h.o ? `<div class="two"><button data-xfer>${ms("swap_horiz")}Transfer</button><button data-cancel>${ms("close")}Cancel</button></div>` : ""}
+        ${relink(h)}
       </div></article>`;
   }
+  // The bank's pay page can stop working before the hold ends: a new link beats cancelling a good hold.
+  const relink = (h) => (S.v >= 4 && h.o && h.pay ? `<button class="relink" data-relink>Pay page not opening? Get a new link</button>` : "");
   const BERTH = (x) => { const b = { "В": "upper", "Н": "lower" }[x]; return b ? `<em>${b}</em>` : ""; };
   function holdSmall(h) {
     return `<article class="block tight hold" data-o="${esc(h.o || "")}">
       <div class="hold-small"><div class="route-line">${route(h.f, h.to)}${h.d ? ` · ${dayLong(h.d)}` : ""}${h.dep ? ` · <span class="num">${hhmm(h.dep)} → ${hhmm(h.arr)}</span>` : ""}</div>
         <div class="line"><div class="tleft"><div class="cd mid" role="timer" data-exp="${+h.exp}"></div><small>left to pay</small></div>
           <div class="pinfo"><b>${esc((h.n || []).join(", "))}</b><div>${esc(h.t)} · Car ${esc(h.c)} · Seat ${seatsLine(h)}${h.cls ? `<br>${esc(shortClass(h.cls))}` : ""}</div></div></div>
-        <div class="btn-row">${h.pay ? `<button class="btn primary" data-pay="${esc(h.pay)}">Pay ${fmtSum(h.sum)} so'm</button>` : `<button class="btn primary" disabled>Link on its way</button>`}
-          ${S.v >= 3 && h.o ? `<button class="btn" data-xfer>Transfer</button><button class="btn" data-cancel>Cancel</button>` : ""}</div></div>
+        <div class="btn-row">${h.pay ? `<button class="btn primary" data-pay="${esc(h.pay)}">Pay ${fmtSum(h.sum)} so'm</button>`
+          : S.v >= 4 && h.o ? `<button class="btn primary" data-relink>Get a payment link</button>` : `<button class="btn primary" disabled>Link on its way</button>`}
+          ${S.v >= 3 && h.o ? `<button class="btn" data-xfer>Transfer</button><button class="btn" data-cancel>Cancel</button>` : ""}</div>${relink(h)}</div>
       <div class="bar thin" data-bar="${+h.exp}"><div></div></div></article>`;
   }
   function cellHtml(c, v, t) {
@@ -411,7 +417,15 @@
     app.querySelectorAll("[data-pay]").forEach((b) => {
       b.onclick = () => {
         if (!/^https:\/\//.test(b.dataset.pay)) return;
+        if (S.v >= 4) send({ a: "paytap", order: b.closest(".hold").dataset.o }, true);
         if (inTelegram) tg.openLink(b.dataset.pay); else window.open(b.dataset.pay, "_blank", "noopener");
+      };
+    });
+    app.querySelectorAll("[data-relink]").forEach((b) => {
+      b.onclick = async () => {
+        b.disabled = true;
+        setTimeout(() => { b.disabled = false; }, 10000);        // it failed if nothing changed by then: allow another try
+        if (await send({ a: "paylink", order: b.closest(".hold").dataset.o })) toast("Getting a new payment link…");
       };
     });
     app.querySelectorAll(".hold").forEach((card) => {
@@ -761,7 +775,7 @@
         <div class="card2 clip"><div id="pax"></div>
           <button class="add-p" id="addNew" type="button">${ms("person_add")}Add new passenger</button>
           <button class="add-p" id="paxRefresh" type="button" style="color:var(--text-2)">${ms("history")}Refresh list</button></div>
-        <label class="card2 row" style="margin-top:8px"><span class="inf"><b>Keep everyone together</b><small>Only hold seats when all passengers fit in the same car</small></span>
+        <label class="card2 row" style="margin-top:8px"><span class="inf"><b>Keep everyone together</b><small>Only hold seats when everyone fits in one compartment (kupe) or one bay (plaskart)</small></span>
           <span class="switch"><input type="checkbox" id="together" aria-label="Keep everyone together"><span></span></span></label>
       </div>
       <details class="adv" id="more"><summary>${ms("expand_more", "closed-i")}${ms("expand_less", "open-i")}<b>Advanced</b></summary>
